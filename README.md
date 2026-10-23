@@ -82,8 +82,13 @@ MXGA 是一个 X（Twitter）垃圾号过滤扩展：社区共建公开黑名单
 ## 与上游同步
 
 ```bash
+# ① 添加上游远程（只需执行一次；已存在时改用：
+#    git remote set-url upstream https://github.com/foru17/make-x-great-again.git）
 git remote add upstream https://github.com/foru17/make-x-great-again.git
-git fetch upstream && git merge upstream/main
+
+# ② 拉取上游并合并（逐条执行；Windows PowerShell 5.1 不支持 && 连写）
+git fetch upstream
+git merge upstream/main
 ```
 
 二开改动集中在 `extension/lib/{gh-repo,block-queue,blocks-sync,x-action}.ts`、`extension/entrypoints/{background,content}.ts`、`extension/entrypoints/options/App.tsx`、`services/edge/src/index.ts` 及 migrations，冲突面小。
