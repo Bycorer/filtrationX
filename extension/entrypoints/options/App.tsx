@@ -24,6 +24,7 @@ import {
   saveDisabledPatterns,
 } from "../../lib/local-rules";
 import { categorizeReason, categorizeReasons } from "../../lib/reason-category";
+import { RUN_LIMITS, type BlockQueueState } from "../../lib/block-queue";
 import {
   DEFAULT_SYNC_CONFIG,
   type RulesSyncConfig,
@@ -446,6 +447,150 @@ function ListStatusCard({ ls, onRefreshed }: { ls: ListState; onRefreshed: () =>
   );
 }
 
+/** 黑名单一键拉黑任务卡（二开）：把公共黑名单条目用你的 X 登录态批量拉黑。
+ *  节奏由后台严格控制（每个约 3.7-5 秒、每日上限 400、连续失败自动停止），
+ *  需要保持一个打开的 x.com 标签页作为执行器。 */
+function BlockQueueCard() {
+  const [q, setQ] = useState<BlockQueueState | null>(null);
+  const [open, setOpen] = useState(false);
+  const [limit, setLimit] = useState<number>(RUN_LIMITS[0]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const bg = (m: unknown) =>
+    new Promise<{ ok: boolean; data?: Record<string, unknown>; error?: string }>((res) => {
+      try {
+        chrome.runtime.sendMessage(m, (r) => res(r ?? { ok: false, error: "no response" }));
+      } catch (e) {
+        res({ ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    });
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      const r = await bg({ type: "block_queue_status" });
+      if (alive && r?.ok) setQ(r.data as unknown as BlockQueueState);
+    };
+    void tick();
+    const t = setInterval(() => void tick(), 2000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+
+  const total = q?.items.length ?? 0;
+  const processed = q?.cursor ?? 0;
+  const active = !!(q?.running || q?.paused);
+
+  const start = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      if (!(await ensureXPermission())) {
+        setErr("需要 x.com 访问权限才能调用 X 的拉黑接口，请授权后重试。");
+        return;
+      }
+      const r = await bg({ type: "block_queue_start", limit });
+      if (!r?.ok) {
+        setErr(r?.error ?? "启动失败");
+        return;
+      }
+      setOpen(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setStatus = async (m: unknown) => {
+    setBusy(true);
+    try {
+      await bg(m);
+      const r = await bg({ type: "block_queue_status" });
+      if (r?.ok) setQ(r.data as unknown as BlockQueueState);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const statusText = (() => {
+    if (!q || total === 0) return null;
+    if (q.running) return `执行中 · 已处理 ${q.cursor}/${total}（成功 ${q.done} · 失败 ${q.failed}）`;
+    if (q.paused) {
+      if (q.needTab) return `已暂停 · 等待 x.com 标签页——打开任意 x.com 页面即自动继续（${q.cursor}/${total}）`;
+      return `已暂停 · ${q.lastError ?? ""}（${q.cursor}/${total}）`;
+    }
+    if (q.cursor >= total && total > 0) {
+      return `已完成 · 成功 ${q.done} · 失败 ${q.failed}${q.lastError ? ` · ${q.lastError}` : ""}`;
+    }
+    return q.lastError ? `已停止 · ${q.lastError}（${q.cursor}/${total}）` : `已停止（${q.cursor}/${total}）`;
+  })();
+
+  return (
+    <div className="block-queue-card mb-6 rounded-lg border border-border bg-card px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-[220px] flex-1">
+          <div className="text-[13px] font-semibold text-fg">黑名单一键拉黑</div>
+          <p className="mt-0.5 text-[12px] leading-relaxed text-fg-3">
+            用你的 X 登录态把名单里的账号原生拉黑。节奏刻意放慢（每个约 4 秒、每日上限 400 个），执行期间请保持一个 x.com 标签页打开。
+          </p>
+        </div>
+        <div className="flex flex-none items-center gap-2">
+          {!active && (
+            <Btn tier="primary" onClick={() => setOpen((v) => !v)}>
+              {open ? "收起" : "一键拉黑"}
+            </Btn>
+          )}
+          {q?.running && (
+            <Btn onClick={() => void setStatus({ type: "block_queue_pause", paused: true })} disabled={busy}>
+              暂停
+            </Btn>
+          )}
+          {q?.paused && !q.needTab && (
+            <Btn tier="primary" onClick={() => void setStatus({ type: "block_queue_pause", paused: false })} disabled={busy}>
+              继续
+            </Btn>
+          )}
+          {active && (
+            <Btn tier="danger" onClick={() => void setStatus({ type: "block_queue_stop" })} disabled={busy}>
+              停止
+            </Btn>
+          )}
+        </div>
+      </div>
+      {statusText && <div className="mt-2 text-[12px] text-fg-2">{statusText}</div>}
+      {open && !active && (
+        <div className="mt-3 rounded-md border border-border-2 p-3">
+          <p className="text-[12px] leading-relaxed text-fg-3">
+            拉黑是 X 原生操作、跨设备生效且对方可见，<b className="text-fg-2">误伤需在 X 上手动解除</b>。
+            名单按顺序执行，已处理过和白名单账号自动跳过。为避免触发 X 风控，请勿同时开多个任务，也不要把每次执行数量设得过大。
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="text-[12px] text-fg-3">本次执行数量：</span>
+            {RUN_LIMITS.map((n) => (
+              <button
+                key={n}
+                type="button"
+                onClick={() => setLimit(n)}
+                className={`rounded-md border px-3 py-1 text-[12px] transition ${
+                  limit === n ? "border-fg bg-card-hi text-fg" : "border-border-2 text-fg-3 hover:border-fg-3"
+                }`}
+              >
+                {n}
+              </button>
+            ))}
+            <Btn tier="primary" onClick={() => void start()} disabled={busy}>
+              {busy ? "启动中…" : `开始拉黑 ${limit} 个`}
+            </Btn>
+          </div>
+          {err && <p className="mt-2 text-[12px] text-danger">{err}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** 共建状态卡：把「登录 GitHub」重新定位成参与公开收集的入口——未登录讲清
  *  登录能开启什么（在线 AI 检测 + 上报），已登录展示贡献状态。 */
 function ContribCard({
@@ -543,6 +688,7 @@ function Overview() {
     <Page title="概览" sub="本地统计 · 数据仅存于本机，不含个人隐私信息">
       <ContribCard login={ghLogin} detections={s.detections} blocked={bl} />
       {ls && <ListStatusCard ls={ls} onRefreshed={loadLists} />}
+      <BlockQueueCard />
       <div className="overview-stats mb-8 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-border bg-border lg:grid-cols-4">
         <Card n={s.detections} l="AI 检测总数" />
         <Card n={s.cacheHits} l="缓存命中 · 省下的 AI 判定" />
@@ -2158,7 +2304,7 @@ function DetectionRulesSection({
         <div className="mt-5 rounded-lg border border-border p-3">
           <div className="mb-1.5 text-[12px] font-semibold text-fg">同步到我的 GitHub 仓库</div>
           <p className="mb-3 text-[12px] leading-relaxed text-fg-3">
-            把上面的自定义词库存成你自己仓库里的一个 JSON 文件（比如 {REPO} 的 fork），在 GitHub 上直接编辑也能同步回本机——仓库文件就是一套可配置的词库，官方仓库的关键词照常生效，两套互不影响。
+            把上面的自定义词库存成你自己仓库里的一个 JSON 文件（比如你的二开仓库 Bycorer/filtrationX），在 GitHub 上直接编辑也能同步回本机——仓库文件就是一套可配置的词库，官方同步下来的关键词照常生效，两套互不影响。
           </p>
           <div className="mb-3 rounded-md border border-border-2 px-3 py-2 text-[12px]">
             {ghLoginName ? (

@@ -107,7 +107,16 @@ export type BgRequest =
   // 举报: the authenticated POST to /v1/report MUST run in the background —
   // a content-script fetch is bound by x.com's CORS/CSP, whereas the SW shares
   // the extension origin the whitelist-apply flow already reports from.
-  | { type: "report"; sig: Signals; category?: SpamCategory };
+  | { type: "report"; sig: Signals; category?: SpamCategory }
+  // 黑名单一键拉黑 (二开, lib/block-queue.ts): the options page starts a
+  // bounded, strictly-paced run; the background owns the persisted queue and
+  // dispatches one item at a time to an open x.com tab's content script.
+  | { type: "block_queue_start"; limit: number }
+  | { type: "block_queue_stop" }
+  | { type: "block_queue_pause"; paused: boolean }
+  | { type: "block_queue_status" }
+  // An x.com content script announces itself as the executor tab on load.
+  | { type: "block_queue_hello" };
 
 export interface BgResponse {
   ok: boolean;

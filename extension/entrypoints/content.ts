@@ -399,6 +399,48 @@ export default defineContentScript({
     const protectedAccount = (sig: Pick<Signals, "userId" | "handle">) =>
       isLocallyWhitelisted(sig.userId, sig.handle) || isWhitelisted(sig.userId, sig.handle);
 
+    // ---- Block-queue worker (二开: 黑名单一键拉黑) ----
+    // The background owns the queue and paces it; THIS tab executes because
+    // only an x.com page holds the ct0 CSRF cookie performXAction needs.
+    // Refuses protected accounts (whitelisted / the viewer itself) — a skip
+    // is reported back so the pump doesn't count it as a failure.
+    chrome.runtime.onMessage.addListener(
+      (msg: { type?: string; item?: { u: string; h: string } }, _s, sendResponse) => {
+        if (msg?.type !== "block_queue_exec") return;
+        void (async () => {
+          try {
+            const item = msg.item;
+            if (!item || (!item.u && !item.h)) {
+              sendResponse({ ok: false, retryable: false });
+              return;
+            }
+            const viewer = viewerHandle() ?? lastViewer;
+            const allowed = () =>
+              settings.enabled &&
+              (!item.h || item.h.toLowerCase() !== (viewer ?? "").toLowerCase()) &&
+              !protectedAccount({ ...(item.u ? { userId: item.u } : {}), handle: item.h });
+            if (!allowed()) {
+              sendResponse({ ok: false, retryable: false, skipped: true });
+              return;
+            }
+            const { performXAction } = await import("../lib/x-action");
+            sendResponse(
+              await performXAction("block", item.u || undefined, item.h, allowed),
+            );
+          } catch {
+            sendResponse({ ok: false, retryable: false });
+          }
+        })();
+        return true;
+      },
+    );
+    // Announce this tab as an available executor (fire-and-forget).
+    try {
+      void chrome.runtime.sendMessage({ type: "block_queue_hello" }).catch(() => {});
+    } catch {
+      /* non-fatal */
+    }
+
     function restoreProtectedSurfaces() {
       const active = new Set<string>();
       for (const surface of document.querySelectorAll<HTMLElement>("[data-xss-hidden-key]")) {

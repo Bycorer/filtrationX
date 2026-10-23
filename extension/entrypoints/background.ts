@@ -57,6 +57,10 @@ const SYNC_ALARM = "xss:list-sync";
 // (the options page does that on save when autoSync is on).
 const RULES_SYNC_ALARM = "xss:rules-sync";
 const RULES_SYNC_PERIOD_MIN = 360;
+// Block-queue watchdog (lib/block-queue.ts): the pump normally self-schedules
+// with setTimeout, but MV3 can reap the SW mid-run — this alarm re-enters
+// pumpBlockQueue() for the persisted, unfinished queue.
+const BLOCK_QUEUE_ALARM = "xss:block-queue";
 // Anonymous official-rule-hit telemetry flush (lib/rule-telemetry.ts owns the
 // queue/dedup; this alarm just drains it). 30min keeps a lost eager-flush
 // from stranding rows for long while staying far from a request storm.
@@ -66,6 +70,104 @@ const RULE_HITS_PERIOD_MIN = 30;
 // changes when the confirmed set changes, and version-match syncs are a
 // single small meta GET.
 const SYNC_PERIOD_MIN = 360;
+
+// ---- Blacklist one-click block queue (二开, lib/block-queue.ts) ----
+// The background owns the persisted queue and the pacing; execution happens
+// in an open x.com tab (only a page holds the ct0 cookie performXAction
+// needs). The pump is deliberately SLOW: one item per PUMP_INTERVAL_MS +
+// jitter, on top of x-action's own slot pacing, cooldowns and 429 backoff —
+// "操作不能太快" is the whole point (X 风控).
+let blockQueuePumping = false;
+const blockQueueSleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function pumpBlockQueue(): Promise<void> {
+  if (blockQueuePumping) return;
+  blockQueuePumping = true;
+  try {
+    for (;;) {
+      const {
+        getBlockQueue,
+        saveBlockQueue,
+        blockQueueDayKey,
+        BLOCK_QUEUE_WORKER_KEY,
+        DAILY_CAP,
+        MAX_FAIL_STREAK,
+        PUMP_INTERVAL_MS,
+        PUMP_JITTER_MS,
+      } = await import("../lib/block-queue");
+      const q = await getBlockQueue();
+      if (!q.running || q.paused) return;
+      if (q.cursor >= q.items.length) {
+        q.running = false;
+        q.needTab = false;
+        await saveBlockQueue(q);
+        return;
+      }
+      const dk = blockQueueDayKey();
+      if (q.dayKey !== dk) {
+        q.dayKey = dk;
+        q.dayCount = 0;
+      }
+      if (q.dayCount >= DAILY_CAP) {
+        q.paused = true;
+        q.lastError = `已达每日安全上限（${DAILY_CAP} 个/天）——明天继续，或确认风控无虞后手动「继续」`;
+        await saveBlockQueue(q);
+        return;
+      }
+      const worker = (await chrome.storage.local.get(BLOCK_QUEUE_WORKER_KEY))[
+        BLOCK_QUEUE_WORKER_KEY
+      ] as { tabId?: number | null } | undefined;
+      let res: import("../lib/block-queue").BlockQueueExecResult | null = null;
+      if (worker?.tabId) {
+        try {
+          res = (await chrome.tabs.sendMessage(worker.tabId, {
+            type: "block_queue_exec",
+            item: q.items[q.cursor],
+          })) as import("../lib/block-queue").BlockQueueExecResult;
+        } catch {
+          res = null; // tab closed / SW of the page gone
+        }
+      }
+      if (!res) {
+        // No executor available: park and wait for the next worker hello.
+        q.needTab = true;
+        q.paused = true;
+        q.lastError = "等待一个打开的 x.com 标签页来执行拉黑";
+        await saveBlockQueue(q);
+        return;
+      }
+      q.cursor++;
+      // skipped = the tab refused (whitelist/protected/self) — not a failure.
+      if (res.ok || res.skipped) {
+        q.done++;
+        q.failStreak = 0;
+        q.lastError = null;
+      } else {
+        q.failed++;
+        q.failStreak++;
+        q.lastError = res.status ? `X 返回 ${res.status}` : "动作未执行";
+      }
+      q.dayCount++;
+      if (!res.ok && !res.skipped && q.failStreak >= MAX_FAIL_STREAK) {
+        q.running = false;
+        q.paused = false;
+        q.lastError = "连续失败过多，已停止——请确认 x.com 仍处于登录状态后重试";
+        await saveBlockQueue(q);
+        return;
+      }
+      await saveBlockQueue(q);
+      await blockQueueSleep(PUMP_INTERVAL_MS + Math.floor(Math.random() * PUMP_JITTER_MS));
+    }
+  } finally {
+    blockQueuePumping = false;
+  }
+}
+
+async function blockQueueWatchdog(): Promise<void> {
+  const { getBlockQueue } = await import("../lib/block-queue");
+  const q = await getBlockQueue();
+  if (q.running && !q.paused) void pumpBlockQueue();
+}
 
 export default defineBackground(() => {
   const ensureAlarm = () => {
@@ -82,6 +184,7 @@ export default defineBackground(() => {
         periodInMinutes: RULES_SYNC_PERIOD_MIN,
         delayInMinutes: 2,
       });
+      chrome.alarms.create(BLOCK_QUEUE_ALARM, { periodInMinutes: 1, delayInMinutes: 1 });
     } catch {
       /* non-fatal */
     }
@@ -111,10 +214,11 @@ export default defineBackground(() => {
           if (out && !out.ok) console.warn("[mxga] rules repo sync:", out.error);
         });
     }
+    if (a.name === BLOCK_QUEUE_ALARM) void blockQueueWatchdog();
   });
 
   chrome.runtime.onMessage.addListener(
-    (msg: BgRequest, _s: chrome.runtime.MessageSender, sendResponse: (r: BgResponse) => void) => {
+    (msg: BgRequest, s: chrome.runtime.MessageSender, sendResponse: (r: BgResponse) => void) => {
       (async () => {
         try {
           if (msg.type === "local-data") {
@@ -199,6 +303,81 @@ export default defineBackground(() => {
               }
               sendResponse({ ok: true, data: { status: res.status, body } });
             }
+          } else if (msg.type === "block_queue_hello") {
+            // An x.com tab announced itself as the executor. Remember it and
+            // unpark a queue that was waiting for a tab.
+            const { BLOCK_QUEUE_WORKER_KEY, getBlockQueue, saveBlockQueue } = await import(
+              "../lib/block-queue"
+            );
+            await chrome.storage.local.set({
+              [BLOCK_QUEUE_WORKER_KEY]: { tabId: s.tab?.id ?? null, at: Date.now() },
+            });
+            const q = await getBlockQueue();
+            if (q.running && q.paused && q.needTab) {
+              q.paused = false;
+              q.needTab = false;
+              q.lastError = null;
+              await saveBlockQueue(q);
+              void pumpBlockQueue();
+            }
+            sendResponse({ ok: true });
+          } else if (msg.type === "block_queue_start") {
+            const { getStoredList, getStoredWhitelist } = await import("../lib/list-sync");
+            const { getBlocklist } = await import("../lib/store");
+            const { buildBlockQueueItems, getBlockQueue, saveBlockQueue } = await import(
+              "../lib/block-queue"
+            );
+            const skip = new Set<string>();
+            for (const r of await getBlocklist()) if (r.id) skip.add(r.id);
+            for (const [uid, handle] of (await getStoredWhitelist())?.entries ?? []) {
+              if (uid) skip.add(uid);
+              skip.add(handle.toLowerCase());
+            }
+            const items = buildBlockQueueItems(
+              (await getStoredList())?.entries ?? [],
+              msg.limit,
+              skip,
+            );
+            if (!items.length) {
+              sendResponse({ ok: false, error: "名单中没有可执行的新条目（可能都已处理过）" });
+            } else {
+              const q = await getBlockQueue();
+              q.items = items;
+              q.cursor = 0;
+              q.done = 0;
+              q.failed = 0;
+              q.failStreak = 0;
+              q.running = true;
+              q.paused = false;
+              q.needTab = false;
+              q.lastError = null;
+              q.startedAt = Date.now();
+              await saveBlockQueue(q);
+              sendResponse({ ok: true, data: { total: items.length } });
+              void pumpBlockQueue();
+            }
+          } else if (msg.type === "block_queue_stop") {
+            const { getBlockQueue, saveBlockQueue } = await import("../lib/block-queue");
+            const q = await getBlockQueue();
+            q.running = false;
+            q.paused = false;
+            q.needTab = false;
+            await saveBlockQueue(q);
+            sendResponse({ ok: true });
+          } else if (msg.type === "block_queue_pause") {
+            const { getBlockQueue, saveBlockQueue } = await import("../lib/block-queue");
+            const q = await getBlockQueue();
+            q.paused = msg.paused;
+            if (!msg.paused) {
+              q.needTab = false;
+              q.lastError = null;
+            }
+            await saveBlockQueue(q);
+            sendResponse({ ok: true });
+            if (!msg.paused) void pumpBlockQueue();
+          } else if (msg.type === "block_queue_status") {
+            const { getBlockQueue } = await import("../lib/block-queue");
+            sendResponse({ ok: true, data: await getBlockQueue() });
           } else {
             sendResponse({ ok: false, error: "unknown message" });
           }
