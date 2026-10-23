@@ -1,5 +1,11 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-23T21:21:23.560Z",
-  "rules": []
+  "updatedAt": "2026-10-23T21:21:47.251Z",
+  "rules": [
+    {
+      "pattern": "比我好看的没我骚",
+      "field": "any",
+      "category": "porn"
+    }
+  ]
 }
