@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-23T21:39:24.671Z",
+  "updatedAt": "2026-10-23T21:40:01.116Z",
   "rules": [
     {
       "pattern": "比我好看的没我骚",
@@ -74,6 +74,11 @@
     },
     {
       "pattern": "@BayrakkSafak",
+      "field": "any",
+      "category": "porn"
+    },
+    {
+      "pattern": "@Nl5Rr8SRLC0fV7V",
       "field": "any",
       "category": "porn"
     }
