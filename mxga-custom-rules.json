@@ -1,11 +1,76 @@
 {
-  "version": 1,
-  "updatedAt": "2026-10-23T21:21:49.661Z",
-  "rules": [
-    {
-      "pattern": "比我好看的没我骚",
-      "field": "any",
-      "category": "porn"
-    }
-  ]
+    "updatedAt":  "2026-10-24T05:38:07Z",
+    "version":  1,
+    "rules":  [
+                  {
+                      "pattern":  "只入身体",
+                      "field":  "tweet",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "要福利约的私信大号",
+                      "field":  "bio",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "同城",
+                      "field":  "display_name",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "我的电报",
+                      "field":  "bio",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "@MIVM2_",
+                      "field":  "tweet",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "无偿",
+                      "field":  "display_name",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "约炮",
+                      "field":  "display_name",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "小号（私信受限）",
+                      "field":  "bio",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "比我好看的没我骚",
+                      "field":  "any",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "DammyJ16942843",
+                      "field":  "any",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "不入生活",
+                      "field":  "tweet",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "@LindseyMan67567",
+                      "field":  "tweet",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "返佣",
+                      "field":  "bio",
+                      "category":  "crypto"
+                  },
+                  {
+                      "pattern":  "比我好看的没我骚",
+                      "field":  "tweet",
+                      "category":  "porn"
+                  }
+              ]
 }
