@@ -34,6 +34,37 @@
 
 ---
 
+> [!IMPORTANT]
+> **这是 [Bycorer/filtrationX](https://github.com/Bycorer/filtrationX) —— MXGA 的二次开发分支**，
+> 基于上游 [foru17/make-x-great-again](https://github.com/foru17/make-x-great-again)（v0.6.1）。
+> 以下新增功能为本分支独有，与上游功能（官方关键词、公共名单同步）并行生效、互不影响。
+> 安装包见仓库根目录构建产物 `filtrationX.zip`（Chrome MV3，开发者模式加载）。
+
+## filtrationX 二开新增功能
+
+| # | 功能 | 说明 | 入口 |
+|---|---|---|---|
+| **F1** | **自定义词库同步到自己的 GitHub 仓库** | 本地自定义关键词可存成你仓库里的一个 JSON 文件（如 `mxga-custom-rules.json`）：本机新增/删除自动推送，你在 GitHub 上直接编辑也会每 6 小时自动合并回本机。写入前强制鉴权（校验令牌对目标仓库的写权限），旧版登录令牌需重新登录 | 设置 → 检测规则 → 自定义规则 → 「同步到我的 GitHub 仓库」 |
+| **F2** | **白名单改绑新的 X id** | 账号改名后，把已批准的白名单名额迁到新 id：新 id 自动识别为当前登录的 X 账号（不可手填、不可替别人改绑），走与首次申请相同的身份鉴权与人工审核；批准时名额自动迁移、旧 id 退出白名单 | 白名单页 → 已批准面板 → 「改绑新的 X id」 |
+| **F3** | **黑名单一键拉黑（严格限速）** | 把公共黑名单条目用你的 X 登录态批量原生拉黑。四层防风控：后台泵 2.5s+抖动间隔（叠加底层 1.2s 限速）≈ 4-5 秒/个、每日上限 400、单次限量 100/300/500（绝不整表跑）、连续 5 次失败自动熔断。需保持一个 x.com 标签页作为执行器，支持暂停/继续/停止，进度本地持久化、关浏览器不丢 | 概览页 → 「黑名单一键拉黑」任务卡 |
+| **F4** | **「本地规则命中也执行我设定的动作」开关** | 默认关闭（规则命中封顶为本地隐藏）。开启后关键词命中按各类别设定的动作执行（含 X 静音/拉黑），仍受档位与「仅推文评论区」范围限制 | 设置 → 自动处理策略 |
+
+### 服务端（二开）
+
+- `services/edge` 新增 `POST /v1/whitelist/apply/rebind`：与首次申请同一套 GitHub 身份 + 反滥用栈，要求名下存在仍生效的已批准申请；配套迁移 `2026-10-24-whitelist-rebind.sql`（`whitelist_requests.supersedes_handle` 列）。审批通过时自动完成名额迁移（新 id 入白名单、旧 id 降级保留审计）。
+- 该端点尚未进入上游，扩展默认仍连接官方 `x.zuoluo.tv`；自部署 edge 后在「设置 → 高级」修改服务地址即可启用全自动改绑。过渡期改绑走 [GitHub Issue 人工通道](https://github.com/foru17/make-x-great-again/issues)（扩展内已预填表单）。
+
+### 与上游同步
+
+```bash
+git remote add upstream https://github.com/foru17/make-x-great-again.git
+git fetch upstream && git merge upstream/main   # 二开改动集中在独立模块，冲突面很小
+```
+
+二开涉及文件：`extension/lib/{gh-repo,block-queue,settings,auto-policy,types}.ts`、`extension/entrypoints/{background,content}.ts`、`extension/entrypoints/options/App.tsx`、`extension/wxt.config.ts`、`services/edge/src/index.ts` 与 migrations。
+
+---
+
 ## 支持的平台与版本
 
 同一套名单与检测逻辑，三个平台版本，选你在用的浏览器装：
