@@ -45,6 +45,10 @@ export default defineConfig({
             "*://x.com/*",
             "*://twitter.com/*",
             "https://github.com/*",
+            // api.github.com: Contents API for the user's own custom-rules
+            // repo file (lib/gh-repo.ts). Requested alongside github.com at
+            // login; CORS also permits direct fetches without it.
+            "https://api.github.com/*",
           ],
         }
       : browser === "safari"
@@ -53,6 +57,7 @@ export default defineConfig({
               "*://x.com/*",
               "*://twitter.com/*",
               "https://github.com/*",
+              "https://api.github.com/*",
             ],
             // Safari requires packaged resources fetched by a content script
             // to be explicitly exposed. This bundled snapshot is only the
@@ -70,6 +75,7 @@ export default defineConfig({
               "*://x.com/*",
               "*://twitter.com/*",
               "https://github.com/*",
+              "https://api.github.com/*",
             ],
           }),
     action: { default_title: "Make X Great Again (MXGA)" },

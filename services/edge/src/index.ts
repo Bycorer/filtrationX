@@ -2597,6 +2597,93 @@ app.get("/v1/whitelist/apply/status", async (c) => {
   return c.json({ status: row.status, handle: row.handle, created_at: row.created_at });
 });
 
+// ---- Rebind (改绑): the approved X handle changed ----
+// The extension captures the viewer handle from the live x.com session, so a
+// rename leaves the approved application pointing at a stale handle and the
+// options page keeps showing the old id. Rebind re-runs the SAME identity +
+// anti-abuse stack, requires a live approved binding under this fingerprint,
+// and queues a pending request for the NEW handle carrying `supersedes_handle`
+// — approving it (same admin endpoint) upserts the new handle AND retires the
+// old one, so the whitelist spot moves instead of duplicating.
+app.post("/v1/whitelist/apply/rebind", async (c) => {
+  const who = await requireReporter(c);
+  if (!who) return c.json({ error: "github_login_required" }, 401);
+  let body: z.infer<typeof WhitelistApplyBody>;
+  try {
+    body = WhitelistApplyBody.parse(await c.req.json());
+  } catch (err) {
+    return c.json({ error: "bad_request", detail: (err as Error).message }, 400);
+  }
+  if (who.ageDays < REPORTER_MIN_AGE_DAYS) {
+    return c.json({ error: "gh_account_too_young", minAgeDays: REPORTER_MIN_AGE_DAYS }, 403);
+  }
+  const fp = await reporterFingerprint(c.env, who.id);
+  if (!fp) {
+    return c.json({ error: "report_salt_required", detail: "REPORT_SALT not configured" }, 503);
+  }
+  const now = Date.now();
+  const aliases = reporterAliases(fp, who.id);
+  const ban = await activeReporterBan(c.env, aliases, now);
+  if (ban) {
+    return c.json({ error: "reporter_banned", reason: ban.reason ?? "banned" }, 403);
+  }
+  if (!(await throttleOk(c.env, fp, now, REPORT_MAX_PER_WINDOW))) {
+    return c.json({ error: "rate_limited", retryAfterMs: REPORT_WINDOW_MS }, 429);
+  }
+
+  // The rebind only makes sense from a LIVE self-service grant: this exact
+  // fingerprint must have an approved application whose handle is still
+  // whitelisted (admin-added or since-removed accounts can't rebind).
+  const approved = await c.env.DB.prepare(
+    `SELECT id, handle FROM whitelist_requests
+      WHERE reporter_fp=? AND status='approved'
+      ORDER BY id DESC LIMIT 1`,
+  )
+    .bind(fp)
+    .first<{ id: number; handle: string }>();
+  if (!approved) return c.json({ error: "no_approved_binding" }, 409);
+  const oldHandle = normalizeHandle(approved.handle);
+  const binding = await findAccount(c.env, oldHandle, null);
+  if (!binding || binding.status !== "whitelisted") {
+    return c.json({ error: "binding_not_whitelisted" }, 409);
+  }
+
+  const handle = normalizeHandle(body.handle);
+  if (handle === oldHandle) {
+    return c.json({ ok: true, status: "already_whitelisted" });
+  }
+  const uid = body.userId ?? null;
+  const cur = await findAccount(c.env, handle, uid);
+  if (cur?.status === "whitelisted") {
+    return c.json({ ok: true, status: "already_whitelisted" });
+  }
+  // One pending application per fingerprint AND per target handle (same as apply).
+  const dup = await c.env.DB.prepare(
+    `SELECT id FROM whitelist_requests
+      WHERE status='pending' AND (reporter_fp=? OR lower(handle)=?)
+      LIMIT 1`,
+  )
+    .bind(fp, handle)
+    .first<{ id: number }>();
+  if (dup) return c.json({ error: "already_pending" }, 409);
+
+  const note = `[改绑自 @${oldHandle}] ${body.note?.trim() ?? ""}`.trim().slice(0, 200);
+  await c.env.DB.prepare(
+    `INSERT INTO whitelist_requests
+       (x_user_id, handle, reporter_fp, gh_age_days, note, status, created_at, supersedes_handle)
+     VALUES (?,?,?,?,?,'pending',?,?)`,
+  )
+    .bind(uid, handle, fp, who.ageDays, note, now, oldHandle)
+    .run();
+  await c.env.DB.prepare(
+    "INSERT INTO review_log (x_user_id,handle,action,actor,note,at) VALUES (?,?,?,?,?,?)",
+  )
+    .bind(uid, handle, "whitelist_apply_rebind", reporterActor(fp), `from=@${oldHandle} age=${who.ageDays}d`, now)
+    .run();
+  await recordReportRate(c.env, fp, now);
+  return c.json({ ok: true, status: "pending", handle, superseded: oldHandle });
+});
+
 // ---- Admin (守门员) ----
 // Constant-time string comparison: hash both sides so length and content
 // differences can't be probed via timing. SHA-256 digests are fixed-width,
@@ -4716,14 +4803,30 @@ async function pendingWhitelistRequest(
   env: Bindings,
   id: number,
 ): Promise<
-  | { row: { id: number; x_user_id: string | null; handle: string; note: string | null; status: string } }
+  | {
+      row: {
+        id: number;
+        x_user_id: string | null;
+        handle: string;
+        note: string | null;
+        status: string;
+        supersedes_handle: string | null;
+      };
+    }
   | { error: Response }
 > {
   const row = await env.DB.prepare(
-    "SELECT id, x_user_id, handle, note, status FROM whitelist_requests WHERE id=?",
+    "SELECT id, x_user_id, handle, note, status, supersedes_handle FROM whitelist_requests WHERE id=?",
   )
     .bind(id)
-    .first<{ id: number; x_user_id: string | null; handle: string; note: string | null; status: string }>();
+    .first<{
+      id: number;
+      x_user_id: string | null;
+      handle: string;
+      note: string | null;
+      status: string;
+      supersedes_handle: string | null;
+    }>();
   if (!row) return { error: Response.json({ error: "not_found" }, { status: 404 }) };
   if (row.status !== "pending") {
     return { error: Response.json({ error: "not_pending", status: row.status }, { status: 409 }) };
@@ -4744,6 +4847,25 @@ app.post("/v1/admin/whitelist-requests/:id/approve", async (c) => {
     ["whitelisted by admin", `self-service request #${row.id}`, row.note ?? ""].filter(Boolean),
   );
   await whitelistUpsert(c.env, row.x_user_id, handle, "", null, reasons, now);
+  // Rebind request: retire the superseded handle in the same action so the
+  // whitelist SPOT moves instead of duplicating. Same soft-remove semantics
+  // as DELETE /v1/admin/whitelist ('rejected' keeps the audit trail).
+  if (row.supersedes_handle) {
+    const oldHandle = normalizeHandle(row.supersedes_handle);
+    if (oldHandle !== handle) {
+      await c.env.DB.prepare(
+        `UPDATE accounts SET status='rejected', source='admin_whitelist', last_scored=?
+          WHERE lower(handle)=lower(?) AND status='whitelisted'`,
+      )
+        .bind(now, oldHandle)
+        .run();
+      await c.env.DB.prepare(
+        "INSERT INTO review_log (x_user_id,handle,action,actor,note,at) VALUES (?,?,?,?,?,?)",
+      )
+        .bind(row.x_user_id, oldHandle, "whitelist_rebind_retire", "admin", `superseded by request #${id}`, now)
+        .run();
+    }
+  }
   await c.env.DB.prepare(
     "UPDATE whitelist_requests SET status='approved', decided_at=? WHERE id=?",
   )

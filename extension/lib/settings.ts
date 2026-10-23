@@ -55,6 +55,7 @@ export interface Settings {
   edgeBase: string; // advanced: override the service base URL — list/whitelist sync source, whitelist-apply backend AND outbound links
   officialRulesEnabled: boolean; // master switch for the synced maintainer-curated keyword rules (per-rule disables live in xss:rules:disabled)
   ruleTelemetry: boolean; // anonymously report OFFICIAL rule hits (spam account identity + matched rule only, never the user's own info) so the maintainer can review & publish them
+  ruleHitsAutoAct: boolean; // opt-in: keyword-rule hits follow the per-category action (incl. X mute/block) instead of being capped at the local hide. Still gated by autoTierMode + reply-scope
   followingWhitelist: boolean; // auto-add accounts the viewer follows to the LOCAL whitelist (never badged / auto-processed); entries live in xss:whitelist:local
 }
 
@@ -82,6 +83,7 @@ export const DEFAULTS: Settings = {
   edgeBase: "",
   officialRulesEnabled: true,
   ruleTelemetry: true,
+  ruleHitsAutoAct: false,
   followingWhitelist: true,
 };
 

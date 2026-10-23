@@ -25,6 +25,16 @@ import {
 } from "../../lib/local-rules";
 import { categorizeReason, categorizeReasons } from "../../lib/reason-category";
 import {
+  DEFAULT_SYNC_CONFIG,
+  type RulesSyncConfig,
+  getRulesSyncConfig,
+  saveRulesSyncConfig,
+  pushRules,
+  pullRules,
+  syncRules,
+  verifyRepoAccess,
+} from "../../lib/gh-repo";
+import {
   type ActionMode,
   type CategoryAction,
   type Settings,
@@ -995,7 +1005,10 @@ function Toggle({
 }
 
 const X_ORIGINS = ["*://x.com/*", "*://twitter.com/*"];
-const GH_ORIGINS = ["https://github.com/*"];
+// github.com: Device Flow login endpoints (no CORS). api.github.com: the
+// user's own custom-rules repo file sync (lib/gh-repo.ts, Contents API —
+// requested together so one login prompt covers both).
+const GH_ORIGINS = ["https://github.com/*", "https://api.github.com/*"];
 // Firefox MV3 data-collection consent needed by online AI checks and whitelist requests.
 const FIREFOX_DATA_COLLECTION = ["authenticationInfo", "personallyIdentifyingInfo", "websiteContent"];
 
@@ -1457,6 +1470,125 @@ function WhitelistApplySection({ edgeBase }: { edgeBase: string }) {
   const input =
     "w-full rounded-md border border-border-2 bg-transparent px-3 py-2 text-[13px] outline-none transition focus:border-accent";
 
+  // ---- 改绑（二开）：X 改名后把已批准的白名单名额迁到新 handle ----
+  // 新 id 不手填：与首次申请同一套防滥用语义——只能是内容脚本从 x.com
+  // 会话捕获的当前登录账号（xss:viewer），杜绝替别人提交改绑。
+  const [rebindOpen, setRebindOpen] = useState(false);
+  const [rebindBusy, setRebindBusy] = useState(false);
+  const [rebindMsg, setRebindMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  // 当前 edge 没有改绑端点（官方服务器未部署此二开功能）→ 提供 Issue 兜底。
+  const [rebindNoEndpoint, setRebindNoEndpoint] = useState(false);
+
+  /** 重读 xss:viewer —— 用户开了 x.com 再回到本页时手动刷新识别结果。 */
+  const refreshViewer = async () => {
+    try {
+      const g = await chrome.storage.local.get("xss:viewer");
+      const v = g["xss:viewer"] as { handle?: string } | undefined;
+      setOwnHandle(v?.handle ?? null);
+    } catch {
+      /* viewer capture is best-effort */
+    }
+  };
+
+  const rebindErrorText = (httpStatus: number, error?: string): string => {
+    switch (error) {
+      case "no_approved_binding":
+        return "没有找到你名下已批准的白名单申请，无法改绑（维护者直接添加的账号请联系维护者修改）。";
+      case "binding_not_whitelisted":
+        return "原账号已不在官方白名单中，无法改绑，请重新提交申请。";
+      case "already_pending":
+        return "已有审核中的申请，请等待维护者处理后再试。";
+      case "github_login_required":
+        return "GitHub 登录已失效，请重新登录。";
+      case "reporter_banned":
+        return "该 GitHub 身份已被限制提交。";
+      case "rate_limited":
+        return "提交过于频繁，请稍后再试。";
+      default:
+        return applyErrorText(httpStatus, error);
+    }
+  };
+
+  /** 改绑端点不可用（404 / CORS 拦截）时的人工兜底：预填好的 GitHub Issue。 */
+  const rebindIssueUrl = (): string => {
+    const newH = (ownHandle ?? "").trim().replace(/^@+/, "");
+    const oldH = ((wlHit ? ownHandle : statusHandle) ?? ownHandle ?? statusHandle ?? "").replace(/^@+/, "");
+    const p = new URLSearchParams();
+    p.set("title", `[Rebind] @${oldH || "…"} → @${newH || "…"}（白名单改绑申请）`);
+    p.set(
+      "body",
+      [
+        "请求把官方白名单名额从旧 X id 改绑到新 X id（账号已改名），扩展改绑入口自动生成：",
+        "",
+        `- GitHub 身份：@${login ?? "未知"}`,
+        `- 旧 X id：@${oldH}`,
+        `- 新 X id：@${newH}`,
+        "",
+        "请维护者核对后在后台完成改绑（新 id 入白名单、旧 id 退出）。",
+      ].join("\n"),
+    );
+    return `${BRAND.issues}/new?${p.toString()}`;
+  };
+
+  const rebind = async () => {
+    setRebindMsg(null);
+    setRebindNoEndpoint(false);
+    // 新 id 只能是识别到的当前登录账号——手填一律拒绝。
+    const h = (ownHandle ?? "").trim().replace(/^@+/, "");
+    if (!/^[A-Za-z0-9_]{1,15}$/.test(h)) {
+      setRebindMsg({ text: "还没有识别到你的 X 账号——打开或刷新一次 x.com 再回到本页点「重新识别」。", ok: false });
+      return;
+    }
+    const tok = token.trim();
+    if (!tok) {
+      setRebindMsg({ text: "请先登录 GitHub（改绑同样需要身份鉴权）。", ok: false });
+      return;
+    }
+    setRebindBusy(true);
+    try {
+      const res = await fetch(`${base}/v1/whitelist/apply/rebind`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${tok}`, "content-type": "application/json" },
+        body: JSON.stringify({ handle: h }),
+      });
+      if (res.status === 404) {
+        // 当前 edge 未部署改绑路由（官方服务器尚未包含此二开功能）。
+        setRebindNoEndpoint(true);
+        setRebindMsg({
+          text: `当前服务（${base}）还没有改绑端点——官方服务器尚未包含此功能。可在下方通过 GitHub Issue 申请人工改绑；或自部署包含改绑端点的 edge 后，在「设置 → 高级」把服务地址改成你的部署。`,
+          ok: false,
+        });
+        return;
+      }
+      const j = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        status?: string;
+        handle?: string;
+        error?: string;
+      };
+      if (res.ok && j.ok && j.status === "already_whitelisted") {
+        setRebindMsg({ text: `@${h} 已在白名单中，无需改绑。`, ok: true });
+      } else if (res.ok && j.ok && j.status === "pending") {
+        // Flip the whole panel into the 审核中 state for the NEW handle —
+        // same UX as a fresh application, the approved card no longer applies.
+        setStatus("pending");
+        setStatusHandle(j.handle ?? h);
+        setWlHit(false);
+      } else {
+        setRebindMsg({ text: rebindErrorText(res.status, j.error), ok: false });
+      }
+    } catch {
+      // fetch throw（Failed to fetch）= CORS 拦截/网络不可达，同样是端点缺失的表现。
+      setRebindNoEndpoint(true);
+      setRebindMsg({
+        text: `无法连接改绑端点（当前服务 ${base} 未部署此功能）。可在下方通过 GitHub Issue 申请人工改绑，或自部署 edge 后修改服务地址。`,
+        ok: false,
+      });
+    } finally {
+      setRebindBusy(false);
+    }
+  };
+
   const identityLine = login && (
     <div className="space-y-1 text-[12px] text-fg-3">
       <p>
@@ -1493,6 +1625,53 @@ function WhitelistApplySection({ edgeBase }: { edgeBase: string }) {
           </div>
         </div>
         {identityLine}
+        {/* 改绑：X 改名后把已批准的名额迁到新 handle（二开） */}
+        <details
+          open={rebindOpen}
+          onToggle={(e) => setRebindOpen((e.target as HTMLDetailsElement).open)}
+          className="rounded-lg border border-border-2 px-3 py-2"
+        >
+          <summary className="cursor-pointer select-none text-[12px] text-fg-2">
+            改绑新的 X id（账号改名后使用）
+          </summary>
+          <p className="mt-2 text-[12px] leading-relaxed text-fg-3">
+            新 id 自动识别为你当前登录的 X 账号（与首次申请同一套防滥用机制，不能替别人改绑）。提交后进入维护者审核；批准时白名单名额自动从旧 id 迁到新 id，旧 id 同步退出白名单。
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {ownHandle ? (
+              <span className="text-[12px] text-fg-2">
+                识别到当前登录的 X 账号：
+                <b className="ml-1 font-mono text-fg">{ownHandle.replace(/^@+/, "")}</b>
+              </span>
+            ) : (
+              <span className="text-[12px] text-warn">
+                未识别到 X 账号——打开或刷新一次 x.com，再回到本页点「重新识别」
+              </span>
+            )}
+            <Btn size="sm" onClick={() => void refreshViewer()}>
+              重新识别
+            </Btn>
+            <Btn tier="primary" onClick={() => void rebind()} disabled={rebindBusy || !ownHandle}>
+              {rebindBusy ? "提交中…" : "提交改绑"}
+            </Btn>
+          </div>
+          {rebindMsg && (
+            <p className={`mt-2 text-[12px] ${rebindMsg.ok ? "text-ok" : "text-danger"}`}>{rebindMsg.text}</p>
+          )}
+          {rebindNoEndpoint && (
+            <div className="mt-2">
+              <a
+                href={rebindIssueUrl()}
+                target="_blank"
+                rel="noopener"
+                className="inline-block rounded-md border border-border-2 px-3 py-1.5 text-[12px] text-fg-2 transition hover:border-fg-3 hover:text-fg"
+              >
+                通过 GitHub Issue 申请人工改绑 ↗（已预填新旧 id）
+              </a>
+            </div>
+          )}
+        </details>
+        {msg && <p className={`text-[12px] ${msg.ok ? "text-ok" : "text-danger"}`}>{msg.text}</p>}
       </section>
     );
   }
@@ -1705,6 +1884,19 @@ function DetectionRulesSection({
     category: "porn",
   });
   const [draftMsg, setDraftMsg] = useState<string | null>(null);
+  // Own-repo sync (lib/gh-repo.ts): the custom keyword library lives as a
+  // JSON file in the user's fork; adds/removes push up when autoSync is on,
+  // and the background alarm merges repo-side edits back every 6h.
+  const [syncCfg, setSyncCfg] = useState<RulesSyncConfig>(DEFAULT_SYNC_CONFIG);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  // 鉴权状态：未登录时禁止一切上传/同步（按钮仍可点，但会给出登录指引）。
+  const [ghLoginName, setGhLoginName] = useState<string | null>(null);
+
+  useEffect(() => {
+    void getRulesSyncConfig().then(setSyncCfg);
+    void getGhLogin().then((l) => setGhLoginName(l || null));
+  }, []);
 
   useEffect(() => {
     void getStoredList().then((list) => {
@@ -1743,11 +1935,97 @@ function DetectionRulesSection({
     setCustom(next);
     setDraft((d) => ({ ...d, pattern: "" }));
     setDraftMsg(null);
+    void maybeAutoPush();
   };
 
   const removeCustom = async (idx: number) => {
     const next = custom.filter((_, i) => i !== idx);
     setCustom(await saveCustomRules(next));
+    void maybeAutoPush();
+  };
+
+  // ---- own-repo sync helpers ----
+
+  const updateSyncCfg = async (patch: Partial<RulesSyncConfig>) => {
+    setSyncCfg(await saveRulesSyncConfig({ ...syncCfg, ...patch }));
+    setSyncMsg(null);
+  };
+
+  /** Fire-and-forget push after a local add/remove (only when autoSync is on). */
+  const maybeAutoPush = async () => {
+    if (!syncCfg.autoSync) return;
+    const token = await getGhToken();
+    if (!token) {
+      setSyncMsg({ text: "已开启自动同步，但尚未登录 GitHub——本次仅保存到本机。", ok: false });
+      return;
+    }
+    const out = await pushRules(token, syncCfg);
+    setSyncMsg(
+      out.ok
+        ? { text: `已自动上传 ${out.ruleCount} 条规则到 ${syncCfg.owner}/${syncCfg.repo}`, ok: true }
+        : { text: `自动上传失败：${out.error}`, ok: false },
+    );
+  };
+
+  const runSync = async (mode: "push" | "pull" | "sync") => {
+    setSyncMsg(null);
+    const token = await getGhToken();
+    if (!token) {
+      setSyncMsg({ text: "未登录 GitHub——请先到「白名单」页完成登录，鉴权通过后才能同步上传", ok: false });
+      return;
+    }
+    if (!syncCfg.owner || !syncCfg.repo) {
+      setSyncMsg({ text: "请先填写 owner/repo、分支与文件路径", ok: false });
+      return;
+    }
+    setSyncBusy(true);
+    try {
+      const out =
+        mode === "push"
+          ? await pushRules(token, syncCfg)
+          : mode === "pull"
+            ? await pullRules(token, syncCfg, saveCustomRules)
+            : await syncRules(token, syncCfg, saveCustomRules);
+      if (out.ok) {
+        if (out.pulled > 0) {
+          setCustom(await getCustomRules());
+          setSyncMsg({ text: `已从仓库合并 ${out.pulled} 条新规则，本机共 ${out.ruleCount} 条`, ok: true });
+        } else if (out.action === "pushed") {
+          setSyncMsg({ text: `已上传 ${out.ruleCount} 条规则到 ${syncCfg.owner}/${syncCfg.repo}`, ok: true });
+        } else {
+          setSyncMsg({ text: `仓库与本机已一致（共 ${out.ruleCount} 条）`, ok: true });
+        }
+      } else {
+        setSyncMsg({ text: out.error, ok: false });
+      }
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  /** 鉴权自检：验证登录令牌对目标仓库的可见性与写权限（push/sync 前也会强制执行）。 */
+  const checkAccess = async () => {
+    setSyncMsg(null);
+    const token = await getGhToken();
+    if (!token) {
+      setSyncMsg({ text: "未登录 GitHub——请先到「白名单」页完成登录", ok: false });
+      return;
+    }
+    if (!syncCfg.owner || !syncCfg.repo) {
+      setSyncMsg({ text: "请先填写 owner/repo", ok: false });
+      return;
+    }
+    setSyncBusy(true);
+    try {
+      const access = await verifyRepoAccess(token, syncCfg);
+      if (access.ok) {
+        setSyncMsg({ text: `鉴权通过：@${ghLoginName ?? "?"} 对 ${syncCfg.owner}/${syncCfg.repo} 有写权限，可以同步`, ok: true });
+      } else {
+        setSyncMsg({ text: access.error ?? "鉴权未通过", ok: false });
+      }
+    } finally {
+      setSyncBusy(false);
+    }
   };
 
   const disabledCount = official.filter((r) => disabled.has(r.pattern)).length;
@@ -1816,7 +2094,7 @@ function DetectionRulesSection({
       <div className="mt-5">
         <div className="mb-1.5 text-[12px] font-semibold text-fg">自定义规则</div>
         <p className="mb-2 text-[12px] leading-relaxed text-fg-3">
-          你自己的关键词规则：仅本机生效、不上传、不参与回传；命中处理方式与官方规则一致，白名单账号永不处理。
+          你自己的关键词规则：默认仅本机生效、不参与匿名回传，可选择同步到你自己的 GitHub 仓库（见下方）。命中处理方式与官方规则一致，白名单账号永不处理。
         </p>
         {custom.length > 0 && (
           <ul className="mb-2 divide-y divide-border overflow-hidden rounded-lg border border-border">
@@ -1875,6 +2153,79 @@ function DetectionRulesSection({
           </Btn>
         </div>
         {draftMsg && <p className="mt-1.5 text-[12px] text-danger">{draftMsg}</p>}
+
+        {/* ---- 同步到自己的 GitHub 仓库（二开：词库文件可配置） ---- */}
+        <div className="mt-5 rounded-lg border border-border p-3">
+          <div className="mb-1.5 text-[12px] font-semibold text-fg">同步到我的 GitHub 仓库</div>
+          <p className="mb-3 text-[12px] leading-relaxed text-fg-3">
+            把上面的自定义词库存成你自己仓库里的一个 JSON 文件（比如 {REPO} 的 fork），在 GitHub 上直接编辑也能同步回本机——仓库文件就是一套可配置的词库，官方仓库的关键词照常生效，两套互不影响。
+          </p>
+          <div className="mb-3 rounded-md border border-border-2 px-3 py-2 text-[12px]">
+            {ghLoginName ? (
+              <span className="text-fg-3">
+                已登录 <b className="text-fg">@{ghLoginName}</b>，上传 / 同步前会先校验该账号对目标仓库的写权限
+              </span>
+            ) : (
+              <span className="text-danger">
+                未登录 GitHub——请到「白名单」页完成登录，鉴权通过后自定义词库才能同步上传到仓库
+              </span>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={syncCfg.owner}
+              onChange={(e) => void updateSyncCfg({ owner: e.target.value })}
+              placeholder="owner（如 Bycorer）"
+              className="min-w-[140px] flex-1 rounded-md border border-border-2 bg-transparent px-3 py-1.5 font-mono text-[12.5px] outline-none transition focus:border-accent"
+            />
+            <input
+              value={syncCfg.repo}
+              onChange={(e) => void updateSyncCfg({ repo: e.target.value })}
+              placeholder="repo（如 filtrationX）"
+              className="min-w-[140px] flex-1 rounded-md border border-border-2 bg-transparent px-3 py-1.5 font-mono text-[12.5px] outline-none transition focus:border-accent"
+            />
+            <input
+              value={syncCfg.branch}
+              onChange={(e) => void updateSyncCfg({ branch: e.target.value })}
+              placeholder="分支"
+              className="w-[90px] rounded-md border border-border-2 bg-transparent px-2 py-1.5 font-mono text-[12.5px] outline-none transition focus:border-accent"
+            />
+            <input
+              value={syncCfg.path}
+              onChange={(e) => void updateSyncCfg({ path: e.target.value })}
+              placeholder="文件路径"
+              className="min-w-[180px] flex-1 rounded-md border border-border-2 bg-transparent px-3 py-1.5 font-mono text-[12.5px] outline-none transition focus:border-accent"
+            />
+          </div>
+          <div className="mt-2">
+            <Toggle
+              on={syncCfg.autoSync}
+              onChange={(v) => void updateSyncCfg({ autoSync: v })}
+              label="自动同步"
+              hint="本机新增 / 删除关键词后立即上传到仓库；同时每 6 小时自动与仓库双向合并——你在 GitHub 上编辑的词库也会同步到本机"
+            />
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Btn onClick={() => void runSync("sync")} disabled={syncBusy}>
+              {syncBusy ? "同步中…" : "双向同步"}
+            </Btn>
+            <Btn onClick={() => void runSync("pull")} disabled={syncBusy}>
+              从仓库拉取
+            </Btn>
+            <Btn onClick={() => void runSync("push")} disabled={syncBusy}>
+              上传（覆盖仓库）
+            </Btn>
+            <Btn onClick={() => void checkAccess()} disabled={syncBusy}>
+              检查权限
+            </Btn>
+          </div>
+          {syncMsg && (
+            <p className={`mt-2 text-[12px] ${syncMsg.ok ? "text-fg-3" : "text-danger"}`}>{syncMsg.text}</p>
+          )}
+          <p className="mt-2 text-[11.5px] leading-relaxed text-fg-3">
+            同步必须鉴权：未登录或令牌对目标仓库没有写权限时，上传一律被拒绝。写入需要含 repo 权限的 GitHub 登录（旧版令牌请退出重新登录一次）；同步只读写上述这一个文件，不影响仓库其他内容。
+          </p>
+        </div>
       </div>
     </section>
   );
@@ -2012,7 +2363,7 @@ function Settings() {
               <div className="mb-1.5 text-[12px] font-semibold text-fg">自动收录条目</div>
               <p className="mb-2 text-[12px] leading-relaxed text-fg-3">
                 命中分两级：<b className="text-fg-2">人工确认</b>（维护者复核过的公榜条目，始终按下方各类别的动作完整执行）和
-                <b className="text-fg-2">自动收录</b>（AI/规则自动上榜的公榜条目 + 本地官方规则命中，占大多数）。这里决定自动上榜条目能自动处理到什么程度；本地规则命中无论选哪档都封顶为本地隐藏。
+                <b className="text-fg-2">自动收录</b>（AI/规则自动上榜的公榜条目 + 本地官方规则命中，占大多数）。这里决定自动上榜条目能自动处理到什么程度；本地规则命中默认封顶为本地隐藏，除非你在下方显式开启。
               </p>
               <div className="grid grid-cols-1 gap-2">
                 {(
@@ -2020,7 +2371,7 @@ function Settings() {
                     {
                       v: "full",
                       label: "完整执行（默认）",
-                      hint: "自动上榜的公榜条目与人工确认同权，按各类别设定的动作执行（包括 X 静音/拉黑）；本地规则命中始终封顶为本地隐藏（尚未上榜、无人复核）。误判可在「处理记录」恢复并申诉。",
+                      hint: "自动上榜的公榜条目与人工确认同权，按各类别设定的动作执行（包括 X 静音/拉黑）；本地规则命中封顶为本地隐藏（尚未上榜、无人复核），除非开启下方「本地规则命中也执行我设定的动作」。误判可在「处理记录」恢复并申诉。",
                     },
                     {
                       v: "hide",
@@ -2059,6 +2410,14 @@ function Settings() {
                   );
                 })}
               </div>
+            </div>
+            <div className="mb-4 rounded-lg border border-border p-3">
+              <Toggle
+                on={st.ruleHitsAutoAct}
+                onChange={(v) => save("ruleHitsAutoAct", v)}
+                label="本地规则命中也执行我设定的动作"
+                hint="默认关闭：官方关键词规则是无人复核的关键词匹配，且命中的大多数是一次误判就会用你的登录态做出不可撤销的 X 静音/拉黑。打开后规则命中按下列类别动作执行（仍受上面的档位和「仅推文评论区」范围限制）。"
+              />
             </div>
             <div className="space-y-2">
               {SPAM_CATEGORIES.map((cat) => (

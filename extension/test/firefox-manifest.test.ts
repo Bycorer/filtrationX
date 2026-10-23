@@ -29,6 +29,8 @@ test("Firefox manifest uses the consent-compatible release baselines", async () 
     "*://x.com/*",
     "*://twitter.com/*",
     "https://github.com/*",
+    // Contents API for the user's own custom-rules repo file (lib/gh-repo.ts).
+    "https://api.github.com/*",
   ]);
   assert.equal(manifest.optional_host_permissions, undefined);
 });

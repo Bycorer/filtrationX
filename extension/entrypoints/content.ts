@@ -1002,6 +1002,7 @@ export default defineContentScript({
             source: badgeSource,
             tier: entry.tier,
             autoTierMode: settings.autoTierMode,
+            ruleHitsAutoAct: settings.ruleHitsAutoAct,
           })
         : "badge";
       // 自动处理 master switch off → everything degrades to mark-only,

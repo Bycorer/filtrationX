@@ -12,10 +12,14 @@ import type { BgRequest, BgResponse } from "../lib/types";
 const GH_CLIENT_ID = "Ov23liP2AbdNePTyKUEA";
 
 async function ghStart() {
+  // scope "read:user repo" (二开): beyond identity lookup the token now also
+  // drives the user's OWN repo keyword-file sync (lib/gh-repo.ts, Contents
+  // API). Legacy tokens with read:user keep working for everything except
+  // the sync — the options page surfaces a "权限不足，请重新登录" hint.
   const r = await fetch("https://github.com/login/device/code", {
     method: "POST",
     headers: { accept: "application/json", "content-type": "application/json" },
-    body: JSON.stringify({ client_id: GH_CLIENT_ID, scope: "read:user" }),
+    body: JSON.stringify({ client_id: GH_CLIENT_ID, scope: "read:user repo" }),
   });
   return (await r.json()) as {
     device_code: string;
@@ -47,6 +51,12 @@ async function ghPoll(deviceCode: string) {
 }
 
 const SYNC_ALARM = "xss:list-sync";
+// Two-way custom-rules ↔ user's-own-GitHub-repo sync (lib/gh-repo.ts). Same
+// 6h cadence as the list sync: a rule edited in the repo file lands on the
+// device within the hour-cycle; a rule added locally is pushed immediately
+// (the options page does that on save when autoSync is on).
+const RULES_SYNC_ALARM = "xss:rules-sync";
+const RULES_SYNC_PERIOD_MIN = 360;
 // Anonymous official-rule-hit telemetry flush (lib/rule-telemetry.ts owns the
 // queue/dedup; this alarm just drains it). 30min keeps a lost eager-flush
 // from stranding rows for long while staying far from a request storm.
@@ -68,6 +78,10 @@ export default defineBackground(() => {
         periodInMinutes: RULE_HITS_PERIOD_MIN,
         delayInMinutes: 5,
       });
+      chrome.alarms.create(RULES_SYNC_ALARM, {
+        periodInMinutes: RULES_SYNC_PERIOD_MIN,
+        delayInMinutes: 2,
+      });
     } catch {
       /* non-fatal */
     }
@@ -85,6 +99,17 @@ export default defineBackground(() => {
     if (a.name === SYNC_ALARM) void syncList();
     if (a.name === RULE_HITS_ALARM) {
       void import("../lib/rule-telemetry").then(({ flushRuleHits }) => flushRuleHits());
+    }
+    if (a.name === RULES_SYNC_ALARM) {
+      void import("../lib/gh-repo")
+        .then(({ syncRulesIfConfigured }) =>
+          import("../lib/local-rules").then(({ saveCustomRules }) =>
+            syncRulesIfConfigured(saveCustomRules),
+          ),
+        )
+        .then((out) => {
+          if (out && !out.ok) console.warn("[mxga] rules repo sync:", out.error);
+        });
     }
   });
 

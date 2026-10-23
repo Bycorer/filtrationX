@@ -54,7 +54,15 @@ export function autoEligible(opts: {
  *  contradicting the options copy "X 静音/拉黑仍只对人工确认条目执行"). */
 export function capAutoTierAction(
   action: CategoryAction,
-  opts: { source: AutoSource; tier: "confirmed" | "auto"; autoTierMode: Settings["autoTierMode"] },
+  opts: {
+    source: AutoSource;
+    tier: "confirmed" | "auto";
+    autoTierMode: Settings["autoTierMode"];
+    /** settings.ruleHitsAutoAct — user's explicit opt-in to let keyword-rule
+     *  hits run the per-category action (incl. X mute/block) when the tier
+     *  mode is "full". The red line otherwise stands. */
+    ruleHitsAutoAct?: boolean;
+  },
 ): CategoryAction {
   if (opts.source === "list" && opts.tier === "confirmed") return action;
   // Local keyword-rule hits are capped at the reversible local hide in EVERY
@@ -64,7 +72,16 @@ export function capAutoTierAction(
   // mute/block with the user's own session was the worst case in the audit.
   // "上榜即可自动处理" (autoTierMode=full) is about PUBLIC-LIST entries, which
   // went through the publish gates; a local hit has not been listed yet.
-  if (opts.source === "rule") return action === "badge" ? "badge" : "hide";
+  //
+  // 2026-10 二开: the user may explicitly lift the cap for rule hits
+  // (settings.ruleHitsAutoAct, default OFF — the options copy keeps warning
+  // about it). Even then the tier mode still governs: "badge" never admits
+  // rule hits (autoEligible) and "hide" keeps its cap; only "full" runs the
+  // per-category action, and the reply-section scope restriction stands.
+  if (opts.source === "rule") {
+    if (opts.ruleHitsAutoAct && opts.autoTierMode === "full") return action;
+    return action === "badge" ? "badge" : "hide";
+  }
   if (opts.autoTierMode === "full") return action;
   return action === "badge" ? "badge" : "hide";
 }
