@@ -424,8 +424,104 @@ export default defineContentScript({
               return;
             }
             const { performXAction } = await import("../lib/x-action");
+            const r = await performXAction("block", item.u || undefined, item.h, allowed);
+            if (r.ok) {
+              // 落一条处理记录（同 enqueueAuto 的先落记录语义），概览页的
+              // 「本地 X 账号黑名单」计数与「处理记录」tab 才能对得上队列执行量。
+              const key = item.u || `h:${item.h}`;
+              void addBlocked(key);
+              void addBlockRecord({
+                id: key,
+                handle: item.h,
+                source: "block_all",
+                reason: "黑名单一键拉黑",
+                ts: Date.now(),
+              });
+            }
+            sendResponse(r);
+          } catch {
+            sendResponse({ ok: false, retryable: false });
+          }
+        })();
+        return true;
+      },
+    );
+    // ---- X 原生拉黑列表同步（二开）：只读分页 GET blocks/list.json ----
+    chrome.runtime.onMessage.addListener(
+      (msg: { type?: string; cursor?: string }, _s, sendResponse) => {
+        if (msg?.type !== "blocks_sync_fetch") return;
+        void (async () => {
+          try {
+            const { X_PUBLIC_BEARER } = await import("../lib/x-action");
+            const ct0 = document.cookie.match(/(?:^|;\s*)ct0=([^;]+)/)?.[1] ?? "";
+            if (!ct0) {
+              sendResponse({ error: "not_logged_in" });
+              return;
+            }
+            const cursor = typeof msg.cursor === "string" ? msg.cursor : "-1";
+            const url = `https://x.com/i/api/1.1/blocks/list.json?count=200&skip_status=true&include_entities=false&cursor=${encodeURIComponent(cursor)}`;
+            const r = await fetch(url, {
+              headers: {
+                authorization: X_PUBLIC_BEARER,
+                "x-csrf-token": ct0,
+                "x-twitter-auth-type": "OAuth2Session",
+                accept: "application/json",
+              },
+              credentials: "include",
+            });
+            if (r.status === 401 || r.status === 403) {
+              sendResponse({ error: "not_logged_in" });
+              return;
+            }
+            if (r.status === 429) {
+              sendResponse({ error: "rate_limited" });
+              return;
+            }
+            if (!r.ok) {
+              sendResponse({ error: `http_${r.status}` });
+              return;
+            }
+            const j = (await r.json()) as {
+              users?: {
+                id_str?: string;
+                screen_name?: string;
+                name?: string;
+                profile_image_url_https?: string;
+              }[];
+              next_cursor?: number | string;
+            };
+            const users = (j.users ?? [])
+              .map((u) => ({
+                u: typeof u.id_str === "string" ? u.id_str : "",
+                h: typeof u.screen_name === "string" ? u.screen_name.toLowerCase() : "",
+                ...(typeof u.name === "string" && u.name ? { n: u.name } : {}),
+                ...(typeof u.profile_image_url_https === "string" && u.profile_image_url_https
+                  ? { a: u.profile_image_url_https }
+                  : {}),
+              }))
+              .filter((u) => u.u || u.h);
+            sendResponse({ users, next_cursor: String(j.next_cursor ?? "0") });
+          } catch {
+            sendResponse({ error: "network" });
+          }
+        })();
+        return true;
+      },
+    );
+    // ---- 解除拉黑（二开）：误操作恢复，与拉黑同一套限速队列 ----
+    chrome.runtime.onMessage.addListener(
+      (msg: { type?: string; u?: string; h?: string }, _s, sendResponse) => {
+        if (msg?.type !== "x_unblock_exec") return;
+        void (async () => {
+          try {
+            const { performXAction } = await import("../lib/x-action");
             sendResponse(
-              await performXAction("block", item.u || undefined, item.h, allowed),
+              await performXAction(
+                "unblock",
+                msg.u || undefined,
+                msg.h,
+                () => settings.enabled,
+              ),
             );
           } catch {
             sendResponse({ ok: false, retryable: false });

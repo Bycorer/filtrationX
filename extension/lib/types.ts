@@ -116,7 +116,14 @@ export type BgRequest =
   | { type: "block_queue_pause"; paused: boolean }
   | { type: "block_queue_status" }
   // An x.com content script announces itself as the executor tab on load.
-  | { type: "block_queue_hello" };
+  | { type: "block_queue_hello" }
+  // X 原生拉黑列表同步 (二开, lib/blocks-sync.ts): manual paged pull of the
+  // user's own blocks via an open x.com tab, relayed by the background.
+  | { type: "blocks_sync_start" }
+  | { type: "blocks_sync_status" }
+  // 误操作恢复：options 页发起，经 background 中继到 x.com 执行器 tab
+  // 调用 blocks/destroy（同一套限速队列）。
+  | { type: "x_unblock_exec"; u: string; h: string };
 
 export interface BgResponse {
   ok: boolean;

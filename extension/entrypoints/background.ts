@@ -169,6 +169,88 @@ async function blockQueueWatchdog(): Promise<void> {
   if (q.running && !q.paused) void pumpBlockQueue();
 }
 
+// ---- X 原生拉黑列表同步 (二开, lib/blocks-sync.ts) ----
+// Manual paged pull of the user's own blocks via an open x.com tab. Read-only
+// GETs with a short inter-page delay; the accumulated list is checkpointed to
+// storage after every page so a reaped SW loses at most one page.
+let blocksSyncRunning = false;
+
+async function runBlocksSync(): Promise<void> {
+  if (blocksSyncRunning) return;
+  blocksSyncRunning = true;
+  try {
+    for (;;) {
+      const {
+        getXBlocksData,
+        saveXBlocksData,
+        getXBlocksSyncState,
+        saveXBlocksSyncState,
+        X_BLOCKS_MAX_USERS,
+        X_BLOCKS_PAGE_DELAY_MS,
+        X_BLOCKS_PAGE_JITTER_MS,
+      } = await import("../lib/blocks-sync");
+      const { BLOCK_QUEUE_WORKER_KEY } = await import("../lib/block-queue");
+      const st = await getXBlocksSyncState();
+      if (!st.running) return;
+      const worker = (await chrome.storage.local.get(BLOCK_QUEUE_WORKER_KEY))[
+        BLOCK_QUEUE_WORKER_KEY
+      ] as { tabId?: number | null } | undefined;
+      if (!worker?.tabId) {
+        st.lastError = "等待一个打开的 x.com 标签页";
+        await saveXBlocksSyncState(st);
+        return; // resumes on the next worker hello / watchdog tick
+      }
+      let res: { users?: { u: string; h: string }[]; next_cursor?: string; error?: string } | null =
+        null;
+      try {
+        res = (await chrome.tabs.sendMessage(worker.tabId, {
+          type: "blocks_sync_fetch",
+          cursor: st.nextCursor ?? "-1",
+        })) as { users?: { u: string; h: string }[]; next_cursor?: string; error?: string };
+      } catch {
+        res = null;
+      }
+      st.pages++;
+      if (!res || res.error) {
+        st.running = false;
+        st.finishedAt = Date.now();
+        st.lastError = !res ? "x.com 标签页不可用，请打开 x.com 后重试" : (res.error ?? "unknown");
+        await saveXBlocksSyncState(st);
+        return;
+      }
+      const data = await getXBlocksData();
+      for (const u of res.users ?? []) {
+        if (data.users.length >= X_BLOCKS_MAX_USERS) break;
+        if (!u.u && !u.h) continue;
+        data.users.push({ u: u.u, h: u.h });
+      }
+      data.syncedAt = Date.now();
+      await saveXBlocksData(data);
+      st.fetched = data.users.length;
+      const next = String(res.next_cursor ?? "0");
+      if (next === "0" || data.users.length >= X_BLOCKS_MAX_USERS) {
+        st.running = false;
+        st.finishedAt = Date.now();
+        st.nextCursor = null;
+        st.lastError = null;
+        await saveXBlocksSyncState(st);
+        return;
+      }
+      st.nextCursor = next;
+      await saveXBlocksSyncState(st);
+      await blockQueueSleep(X_BLOCKS_PAGE_DELAY_MS + Math.floor(Math.random() * X_BLOCKS_PAGE_JITTER_MS));
+    }
+  } finally {
+    blocksSyncRunning = false;
+  }
+}
+
+async function blocksSyncWatchdog(): Promise<void> {
+  const { getXBlocksSyncState } = await import("../lib/blocks-sync");
+  const st = await getXBlocksSyncState();
+  if (st.running) void runBlocksSync();
+}
+
 export default defineBackground(() => {
   const ensureAlarm = () => {
     try {
@@ -214,7 +296,10 @@ export default defineBackground(() => {
           if (out && !out.ok) console.warn("[mxga] rules repo sync:", out.error);
         });
     }
-    if (a.name === BLOCK_QUEUE_ALARM) void blockQueueWatchdog();
+    if (a.name === BLOCK_QUEUE_ALARM) {
+      void blockQueueWatchdog();
+      void blocksSyncWatchdog();
+    }
   });
 
   chrome.runtime.onMessage.addListener(
@@ -378,6 +463,43 @@ export default defineBackground(() => {
           } else if (msg.type === "block_queue_status") {
             const { getBlockQueue } = await import("../lib/block-queue");
             sendResponse({ ok: true, data: await getBlockQueue() });
+          } else if (msg.type === "blocks_sync_start") {
+            const { getXBlocksSyncState, saveXBlocksSyncState } = await import("../lib/blocks-sync");
+            const st = await getXBlocksSyncState();
+            if (!st.running) {
+              st.running = true;
+              st.pages = 0;
+              st.fetched = 0;
+              st.nextCursor = "-1";
+              st.lastError = null;
+              st.finishedAt = null;
+              await saveXBlocksSyncState(st);
+              void runBlocksSync();
+            }
+            sendResponse({ ok: true, data: st });
+          } else if (msg.type === "blocks_sync_status") {
+            const { getXBlocksSyncState } = await import("../lib/blocks-sync");
+            sendResponse({ ok: true, data: await getXBlocksSyncState() });
+          } else if (msg.type === "x_unblock_exec") {
+            const { BLOCK_QUEUE_WORKER_KEY } = await import("../lib/block-queue");
+            const worker = (await chrome.storage.local.get(BLOCK_QUEUE_WORKER_KEY))[
+              BLOCK_QUEUE_WORKER_KEY
+            ] as { tabId?: number | null } | undefined;
+            if (!worker?.tabId) {
+              sendResponse({ ok: false, error: "no_tab" });
+            } else {
+              try {
+                sendResponse(
+                  (await chrome.tabs.sendMessage(worker.tabId, {
+                    type: "x_unblock_exec",
+                    u: msg.u,
+                    h: msg.h,
+                  })) as BgResponse,
+                );
+              } catch {
+                sendResponse({ ok: false, error: "no_tab" });
+              }
+            }
           } else {
             sendResponse({ ok: false, error: "unknown message" });
           }

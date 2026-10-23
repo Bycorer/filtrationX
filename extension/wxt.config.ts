@@ -24,9 +24,9 @@ export default defineConfig({
   // new AMO listings need the taxonomy in the manifest.
   suppressWarnings: { firefoxDataCollection: true },
   manifest: ({ browser }) => ({
-    name: "Make X Great Again (MXGA)",
+    name: "filtrationX（MXGA 二开版）",
     description:
-      "Local X spam-list matching with authenticated online AI checks for newly encountered accounts. Open source.",
+      "基于 Make X Great Again (MXGA) 的二开分支：词库同步个人仓库 / 白名单改绑 / 限速一键拉黑。Local-first, open source.",
     // alarms: periodic list refresh; unlimitedStorage: the cached list
     // (~5MB) plus local records would otherwise crowd the 10MB default
     // quota. Neither adds an install-time permission warning.
@@ -78,7 +78,7 @@ export default defineConfig({
               "https://api.github.com/*",
             ],
           }),
-    action: { default_title: "Make X Great Again (MXGA)" },
+    action: { default_title: "filtrationX" },
     options_ui: { open_in_tab: true },
     // Firefox / AMO requirements (ignored by the Chrome build):
     //  - gecko.id: stable add-on ID, keyed to a domain we control.

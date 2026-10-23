@@ -11,7 +11,7 @@
 //
 // Recovered and generalized from the pre-v0.5.0 block implementation.
 
-export type XActionKind = "mute" | "block";
+export type XActionKind = "mute" | "block" | "unblock";
 
 export interface XActionAttempt {
   ok: boolean;
@@ -27,10 +27,15 @@ export interface XActionAttempt {
 // X web's long-standing public bearer (same one the site itself sends).
 const FALLBACK_X_BEARER =
   "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
+/** Exported for the blocks-list sync (lib/blocks-sync.ts) — same public
+ *  credential, GET side. */
+export const X_PUBLIC_BEARER = FALLBACK_X_BEARER;
 
 const ENDPOINT: Record<XActionKind, string> = {
   block: "/i/api/1.1/blocks/create.json",
   mute: "/i/api/1.1/mutes/users/create.json",
+  // 误操作恢复（二开）：解除拉黑，走同一套限速队列。
+  unblock: "/i/api/1.1/blocks/destroy.json",
 };
 
 // Pacing — shared across both action kinds (both are write actions against

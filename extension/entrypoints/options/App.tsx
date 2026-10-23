@@ -26,6 +26,14 @@ import {
 import { categorizeReason, categorizeReasons } from "../../lib/reason-category";
 import { RUN_LIMITS, type BlockQueueState } from "../../lib/block-queue";
 import {
+  type XBlockedUser,
+  type XBlocksData,
+  type XBlocksSyncState,
+  blocksSyncErrorText,
+  getXBlocksData,
+  removeXBlockedUser,
+} from "../../lib/blocks-sync";
+import {
   DEFAULT_SYNC_CONFIG,
   type RulesSyncConfig,
   getRulesSyncConfig,
@@ -447,6 +455,277 @@ function ListStatusCard({ ls, onRefreshed }: { ls: ListState; onRefreshed: () =>
   );
 }
 
+/** 本地 X 账号黑名单（二开）：识别你 X 账号原生已拉黑的账号——数量 + 详细
+ *  列表。真值在 X 侧，新装显示 0，点「同步拉黑列表」通过打开的 x.com 标签页
+ *  分页拉取（只读 GET，页间短暂停顿），结果存本机、不上传。另附本机处理
+ *  记录计数（含一键拉黑队列的落账），明细在「处理记录」tab。 */
+function LocalBlocklistCard({ localCount }: { localCount: number }) {
+  const [data, setData] = useState<XBlocksData | null>(null);
+  const [sync, setSync] = useState<XBlocksSyncState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const bg = (m: unknown) =>
+    new Promise<{ ok: boolean; data?: Record<string, unknown>; error?: string }>((res) => {
+      try {
+        chrome.runtime.sendMessage(m, (r) => res(r ?? { ok: false, error: "no response" }));
+      } catch (e) {
+        res({ ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    });
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      const r = await bg({ type: "blocks_sync_status" });
+      if (alive && r?.ok) setSync(r.data as unknown as XBlocksSyncState);
+      if (alive) setData(await getXBlocksData());
+    };
+    void tick();
+    const t = setInterval(() => void tick(), 2000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+
+  const start = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
+      if (!(await ensureXPermission())) {
+        setErr("需要 x.com 访问权限才能读取你的拉黑列表，请授权后重试。");
+        return;
+      }
+      await bg({ type: "blocks_sync_start" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const count = data?.count ?? 0;
+  const syncing = !!sync?.running;
+
+  return (
+    <div className="local-blocklist-card mb-6 rounded-lg border border-border bg-card px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+          <span className="text-[13px] font-semibold text-fg">本地 X 账号黑名单</span>
+          <span className="text-[13px]">
+            <b className="font-mono text-[16px] tabular-nums text-fg">{count.toLocaleString("zh-CN")}</b>
+            <span className="ml-1 text-fg-3">个账号</span>
+          </span>
+          <span className="text-[12px] text-fg-3">
+            你 X 账号已原生拉黑的账号
+            {data?.syncedAt ? ` · 同步于 ${relTime(data.syncedAt)}` : " · 尚未同步"}
+            {` · 仅存本机`}
+          </span>
+        </div>
+        <div className="flex flex-none items-center gap-2">
+          <Btn tier="primary" onClick={() => void start()} disabled={busy || syncing}>
+            {syncing ? "同步中…" : count > 0 ? "重新同步" : "同步拉黑列表"}
+          </Btn>
+          <a href="?tab=xblocks" className="flex-none text-[12px] text-fg-3 hover:text-fg">
+            明细与解除拉黑 →
+          </a>
+        </div>
+      </div>
+      {syncing && (
+        <div className="mt-2 text-[12px] text-fg-2">
+          正在从 X 分页拉取 · 已获取 {sync?.fetched.toLocaleString("zh-CN") ?? 0} 个（{sync?.pages ?? 0} 页）
+          ——请保持一个 x.com 标签页打开
+        </div>
+      )}
+      {!syncing && sync?.lastError && (
+        <div className="mt-2 text-[12px] text-danger">{blocksSyncErrorText(sync.lastError)}</div>
+      )}
+      {err && <div className="mt-2 text-[12px] text-danger">{err}</div>}
+      <div className="mt-2 border-t border-border pt-2 text-[12px] text-fg-3">
+        本机处理记录 {localCount.toLocaleString("zh-CN")} 条（含一键拉黑队列落账）·
+        <a href="?tab=blocklist" className="ml-1 text-fg-2 hover:text-fg">
+          明细见「处理记录」→
+        </a>
+      </div>
+    </div>
+  );
+}
+
+/** X 拉黑（二开）：你 X 账号原生已拉黑的账号列表（只读同步）。
+ *  误拉黑的账号可直接「解除拉黑」——走你的 X 登录态调用 X 的
+ *  blocks/destroy，与拉黑同一套限速队列（防风控）。 */
+function XBlocksPage() {
+  const [data, setData] = useState<XBlocksData | null>(null);
+  const [sync, setSync] = useState<XBlocksSyncState | null>(null);
+  const [q, setQ] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const bg = (m: unknown) =>
+    new Promise<{ ok: boolean; data?: Record<string, unknown>; error?: string }>((res) => {
+      try {
+        chrome.runtime.sendMessage(m, (r) => res(r ?? { ok: false, error: "no response" }));
+      } catch (e) {
+        res({ ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    });
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      const r = await bg({ type: "blocks_sync_status" });
+      if (alive && r?.ok) setSync(r.data as unknown as XBlocksSyncState);
+      if (alive) setData(await getXBlocksData());
+    };
+    void tick();
+    const t = setInterval(() => void tick(), 2000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+
+  const start = async () => {
+    setErr(null);
+    setSyncBusy(true);
+    try {
+      if (!(await ensureXPermission())) {
+        setErr("需要 x.com 访问权限才能读取你的拉黑列表，请授权后重试。");
+        return;
+      }
+      await bg({ type: "blocks_sync_start" });
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const unblock = async (u: XBlockedUser) => {
+    const key = u.u || u.h;
+    setBusyId(key);
+    setMsg(null);
+    try {
+      const r = await bg({ type: "x_unblock_exec", u: u.u, h: u.h });
+      const d = r?.data as { ok?: boolean; status?: number } | undefined;
+      if (r?.ok && d?.ok) {
+        await removeXBlockedUser(u.u, u.h);
+        await getXBlocksData().then(setData);
+        setMsg({ text: `@${u.h || u.u} 已解除拉黑，X 上立即生效。`, ok: true });
+      } else if (r?.error === "no_tab") {
+        setMsg({ text: "需要一个打开的 x.com 标签页来执行解除拉黑。", ok: false });
+      } else if (d?.status === 401 || d?.status === 403) {
+        setMsg({ text: "X 登录态已失效，请在浏览器重新登录 X 后重试。", ok: false });
+      } else {
+        setMsg({ text: `解除失败${d?.status ? `（X 返回 ${d.status}）` : ""}，请稍后重试。`, ok: false });
+      }
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const users = data?.users ?? [];
+  const rows = useMemo(
+    () =>
+      users.filter((u) =>
+        `${u.h} ${u.n ?? ""} ${u.u}`.toLowerCase().includes(q.toLowerCase()),
+      ),
+    [users, q],
+  );
+  const syncing = !!sync?.running;
+
+  return (
+    <Page
+      title="X 拉黑"
+      sub={`共 ${(data?.count ?? 0).toLocaleString("zh-CN")} 个 · 你 X 账号原生已拉黑的账号（只读同步，仅存本机）· 误拉黑的账号可在右侧「解除拉黑」恢复`}
+    >
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <input
+          aria-label="搜索 X 拉黑列表"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="搜索 @handle / 显示名 / ID"
+          className="w-full max-w-[320px] rounded-md border border-border-2 bg-transparent px-3 py-2 text-[13px] outline-none transition focus:border-accent"
+        />
+        <Btn tier="primary" onClick={() => void start()} disabled={syncBusy || syncing}>
+          {syncing ? "同步中…" : data?.syncedAt ? "重新同步" : "同步拉黑列表"}
+        </Btn>
+        {syncing && (
+          <span className="text-[12px] text-fg-2">
+            已获取 {sync?.fetched.toLocaleString("zh-CN") ?? 0} 个（{sync?.pages ?? 0} 页）· 保持一个 x.com 标签页打开
+          </span>
+        )}
+        {!syncing && sync?.lastError && (
+          <span className="text-[12px] text-danger">{blocksSyncErrorText(sync.lastError)}</span>
+        )}
+        {err && <span className="text-[12px] text-danger">{err}</span>}
+      </div>
+      {msg && <p className={`mb-4 text-[12px] ${msg.ok ? "text-ok" : "text-danger"}`}>{msg.text}</p>}
+      {rows.length === 0 ? (
+        <p className="py-10 text-center text-[13px] text-fg-3">
+          {data?.syncedAt ? "没有匹配的账号" : "还没有同步过——点上方「同步拉黑列表」获取你 X 账号过往已拉黑的账号"}
+        </p>
+      ) : (
+        <div className="desktop-record-table overflow-x-auto rounded-lg border border-border">
+          <table className="w-full min-w-[680px] border-collapse text-[13px]">
+            <thead className="bg-card">
+              <tr>
+                <th className={th}>账号</th>
+                <th className={th}>X ID</th>
+                <th className={th} />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((u) => {
+                const key = u.u || u.h;
+                return (
+                  <tr key={key} className={trHover}>
+                    <td className={td}>
+                      <div className="flex min-w-0 items-center gap-2.5">
+                        <AvatarLink handle={u.h} url={u.a} name={u.n || u.h} />
+                        <div className="min-w-0">
+                          <div className="max-w-[220px] truncate font-semibold tracking-[-0.005em]">
+                            {u.n ? (
+                              <a
+                                href={`https://x.com/${encodeURIComponent(u.h || u.u)}`}
+                                target="_blank"
+                                rel="noopener"
+                                className="text-fg transition hover:text-accent"
+                                title={`去 @${u.h || u.u} 的 X 主页`}
+                              >
+                                {u.n}
+                              </a>
+                            ) : (
+                              <HandleLink handle={u.h || u.u} className="text-fg" />
+                            )}
+                          </div>
+                          <div className="max-w-[220px] truncate text-[12px] text-fg-3">
+                            <HandleLink handle={u.h || u.u} className="text-fg-3" />
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+                    <td className={`${td} font-mono text-[12px] text-fg-3`}>{u.u || "—"}</td>
+                    <td className={`${td} text-right`}>
+                      <Btn tier="danger" onClick={() => void unblock(u)} disabled={busyId === key}>
+                        {busyId === key ? "解除中…" : "解除拉黑"}
+                      </Btn>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {data && data.count > rows.length && (
+        <p className="mt-3 text-[12px] text-fg-3">
+          搜索过滤后显示 {rows.length.toLocaleString("zh-CN")} 个（全部 {data.count.toLocaleString("zh-CN")} 个）。
+        </p>
+      )}
+    </Page>
+  );
+}
+
 /** 黑名单一键拉黑任务卡（二开）：把公共黑名单条目用你的 X 登录态批量拉黑。
  *  节奏由后台严格控制（每个约 3.7-5 秒、每日上限 400、连续失败自动停止），
  *  需要保持一个打开的 x.com 标签页作为执行器。 */
@@ -688,6 +967,7 @@ function Overview() {
     <Page title="概览" sub="本地统计 · 数据仅存于本机，不含个人隐私信息">
       <ContribCard login={ghLogin} detections={s.detections} blocked={bl} />
       {ls && <ListStatusCard ls={ls} onRefreshed={loadLists} />}
+      <LocalBlocklistCard localCount={bl} />
       <BlockQueueCard />
       <div className="overview-stats mb-8 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-border bg-border lg:grid-cols-4">
         <Card n={s.detections} l="AI 检测总数" />
@@ -3253,6 +3533,7 @@ function BackupPage() {
 const TABS = [
   ["overview", "概览", Overview],
   ["blocklist", "处理记录", Blocklist],
+  ["xblocks", "X 拉黑", XBlocksPage],
   ["cache", "检测缓存", Cache],
   ["settings", "设置", Settings],
   ["whitelist", "白名单", WhitelistPage],
