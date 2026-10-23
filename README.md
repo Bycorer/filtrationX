@@ -1,6 +1,6 @@
 # filtrationX
 
-基于 [Make X Great Again (MXGA)](https://github.com/foru17/make-x-great-again) v0.6.1 的二次开发分支（AGPL-3.0）。
+基于 [Make X Great Again (MXGA)](https://github.com/foru17/make-x-great-again) v0.6.1 的二次开发分支（v0.6.2，AGPL-3.0），扩展名 `filtrationX（MXGA 二开版）`。
 MXGA 是一个 X（Twitter）垃圾号过滤扩展：社区共建公开黑名单 + 本地关键词匹配，帮你把广告号和色情 bot 标出来。上游的完整文档、治理规则与隐私说明见[原仓库](https://github.com/foru17/make-x-great-again)。
 
 本分支保留上游全部能力（官方关键词、公共名单 6 小时同步、本地隐藏 / 静音 / 拉黑、在线 AI 检测等），并新增以下四项功能，与上游功能并行生效、互不影响。
@@ -41,11 +41,22 @@ MXGA 是一个 X（Twitter）垃圾号过滤扩展：社区共建公开黑名单
 
 - 需保持一个打开的 x.com 标签页作为执行器（拉黑请求必须由 x.com 页面发出）
 - 支持暂停 / 继续 / 停止；进度本地持久化，关浏览器不丢，1 分钟看门狗自动续跑
-- 已处理过、白名单账号、你自己一律自动跳过
+- 已处理过、白名单账号、你自己一律自动跳过；拉黑成功自动落账到「处理记录」
 
 入口：概览页 → 「黑名单一键拉黑」任务卡
 
-### F4 · 「本地规则命中也执行我设定的动作」开关
+### F4 · X 原生拉黑列表同步与误操作恢复
+
+识别你 X 账号**过往已经拉黑**的账号——新装扩展显示 0，点一下手动同步即可：
+
+- 「同步拉黑列表」通过打开的 x.com 标签页分页拉取 X 的 `blocks/list.json`（只读，每页 200 个、页间自动停顿），数量 + 详细列表（头像 / 昵称 / @handle / ID）存本机
+- 侧边栏独立「X 拉黑」页：仿处理记录的表格样式 + 搜索过滤
+- **误操作恢复**：每行「解除拉黑」调用 X 的 `blocks/destroy.json`，与拉黑共用同一套限速队列，成功后立即生效并从列表移除
+- 同步与解除都是只读/单账号操作，结果仅存本机不上传
+
+入口：概览页 → 「本地 X 账号黑名单」卡片（同步入口）→ 侧边栏「X 拉黑」页（明细与解除）
+
+### F5 · 「本地规则命中也执行我设定的动作」开关
 
 默认关闭（关键词命中封顶为本地隐藏）。开启后规则命中按各类别设定的动作执行（含 X 静音 / 拉黑），仍受自动收录档位与「仅推文评论区」范围限制。
 
@@ -75,7 +86,7 @@ git remote add upstream https://github.com/foru17/make-x-great-again.git
 git fetch upstream && git merge upstream/main
 ```
 
-二开改动集中在 `extension/lib/{gh-repo,block-queue}.ts`、`extension/entrypoints/{background,content}.ts`、`extension/entrypoints/options/App.tsx`、`services/edge/src/index.ts` 及 migrations，冲突面小。
+二开改动集中在 `extension/lib/{gh-repo,block-queue,blocks-sync,x-action}.ts`、`extension/entrypoints/{background,content}.ts`、`extension/entrypoints/options/App.tsx`、`services/edge/src/index.ts` 及 migrations，冲突面小。
 
 ## 许可
 
