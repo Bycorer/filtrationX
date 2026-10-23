@@ -1,5 +1,5 @@
 {
-    "updatedAt":  "2026-10-24T05:46:27Z",
+    "updatedAt":  "2026-10-24T05:48:08Z",
     "version":  1,
     "rules":  [
                   {
@@ -34,6 +34,11 @@
                   },
                   {
                       "pattern":  "只入身体",
+                      "field":  "tweet",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "露乃挖矿",
                       "field":  "tweet",
                       "category":  "porn"
                   },
@@ -88,6 +93,16 @@
                       "category":  "porn"
                   },
                   {
+                      "pattern":  "审核都不封她",
+                      "field":  "tweet",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "快手号",
+                      "field":  "tweet",
+                      "category":  "porn"
+                  },
+                  {
                       "pattern":  "我的电报",
                       "field":  "bio",
                       "category":  "porn"
@@ -118,12 +133,12 @@
                       "category":  "porn"
                   },
                   {
-                      "pattern":  "不入生活",
+                      "pattern":  "金主缸交",
                       "field":  "tweet",
                       "category":  "porn"
                   },
                   {
-                      "pattern":  "满足各种性癖",
+                      "pattern":  "高清无雾",
                       "field":  "tweet",
                       "category":  "porn"
                   },
@@ -133,13 +148,18 @@
                       "category":  "porn"
                   },
                   {
-                      "pattern":  "找固炮",
-                      "field":  "display_name",
+                      "pattern":  "满足各种性癖",
+                      "field":  "tweet",
                       "category":  "porn"
                   },
                   {
-                      "pattern":  "t.me/xiaoci288",
-                      "field":  "bio",
+                      "pattern":  "不入生活",
+                      "field":  "tweet",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "找固炮",
+                      "field":  "display_name",
                       "category":  "porn"
                   },
                   {
@@ -158,8 +178,23 @@
                       "category":  "porn"
                   },
                   {
+                      "pattern":  "饼干姐姐转快手",
+                      "field":  "tweet",
+                      "category":  "porn"
+                  },
+                  {
                       "pattern":  "大号呗小号不看",
                       "field":  "bio",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "t.me/xiaoci288",
+                      "field":  "bio",
+                      "category":  "porn"
+                  },
+                  {
+                      "pattern":  "勾引大哥",
+                      "field":  "tweet",
                       "category":  "porn"
                   },
                   {
