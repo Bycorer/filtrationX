@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-23T22:03:17.725Z",
+  "updatedAt": "2026-10-23T22:05:15.712Z",
   "rules": [
     {
       "pattern": "比我好看的没我骚",
@@ -200,6 +200,11 @@
     {
       "pattern": "水超多",
       "field": "tweet",
+      "category": "porn"
+    },
+    {
+      "pattern": "@ayuksianjie",
+      "field": "any",
       "category": "porn"
     }
   ]
