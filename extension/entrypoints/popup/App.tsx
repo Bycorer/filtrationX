@@ -162,7 +162,7 @@ export function App() {
         保护我的账号 · 加入白名单
       </button>
 
-      <div className="mt-2 grid grid-cols-2 gap-1.5">
+      <div className="mt-2 grid grid-cols-3 gap-1.5">
         <a
           href={`${edgeBase}/list`}
           target="_blank"
@@ -177,7 +177,15 @@ export function App() {
           rel="noopener"
           className="rounded-md border border-border-2 px-2.5 py-1.5 text-center text-[12px] text-fg-2 transition hover:bg-card-hi hover:text-fg"
         >
-          GitHub
+          本项目
+        </a>
+        <a
+          href={BRAND.upstreamRepo}
+          target="_blank"
+          rel="noopener"
+          className="rounded-md border border-border-2 px-2.5 py-1.5 text-center text-[12px] text-fg-2 transition hover:bg-card-hi hover:text-fg"
+        >
+          原项目
         </a>
       </div>
 

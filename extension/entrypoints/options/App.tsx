@@ -3583,9 +3583,19 @@ function NavigationFooter() {
         rel="noopener"
         className="block min-h-11 content-center rounded-md px-3 text-fg-2 hover:bg-card hover:text-fg"
       >
-        GitHub ↗
+        本项目 GitHub ↗
       </a>
-      <div className="px-3 pt-1 font-mono text-fg-4">v{chrome.runtime.getManifest().version}</div>
+      <a
+        href={BRAND.upstreamRepo}
+        target="_blank"
+        rel="noopener"
+        className="block min-h-11 content-center rounded-md px-3 text-fg-2 hover:bg-card hover:text-fg"
+      >
+        原项目 MXGA ↗
+      </a>
+      <div className="px-3 pt-1 font-mono text-fg-4">
+        v{chrome.runtime.getManifest().version_name ?? chrome.runtime.getManifest().version}
+      </div>
     </div>
   );
 }
