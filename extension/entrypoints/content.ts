@@ -19,6 +19,13 @@ import {
 } from "../lib/detect";
 import { CATEGORY_ZH, type SpamCategory } from "../lib/category";
 import { hideKolCard, scheduleHideKolCard, showKolCard } from "../lib/kol-card";
+import {
+  flushKolSignals,
+  kolSignalsFor,
+  noteKolSample,
+  trustAssessment,
+  warmKolSignals,
+} from "../lib/kol-signals";
 import { readBridgeUser } from "../lib/x-user-bridge";
 import { LIST_KEY, WL_KEY } from "../lib/list-sync";
 import { type IndexEntry, isWhitelisted, lookupLocal, warmLocalIndex } from "../lib/local-index";
@@ -382,6 +389,7 @@ export default defineContentScript({
     await warmLocalIndex();
     await warmRuleConfig();
     await warmLocalWhitelist();
+    await warmKolSignals(); // KOL 浮卡 L2 采样缓存（M2）
 
     async function refreshOnlineAuth(): Promise<boolean> {
       const before = onlineAuthenticated;
@@ -620,6 +628,16 @@ export default defineContentScript({
             favouritesCount: u.favouritesCount,
             whitelisted,
             viewerFollowing: u.viewerFollowing,
+            // M2: 本地采样结论（原创比 / 主题集中度 / 综合可信分）。
+            ...kolSignalsFor(handle),
+            trust: trustAssessment({
+              accountAgeDays: u.accountAgeDays,
+              followersCount: u.followersCount,
+              followingCount: u.followingCount,
+              statusesCount: u.statusesCount,
+              favouritesCount: u.favouritesCount,
+              ...kolSignalsFor(handle),
+            }),
           });
         }, KOL_HOVER_DELAY_MS);
       },
@@ -1530,9 +1548,42 @@ export default defineContentScript({
       }
     }
 
+    // ---- KOL 浮卡 L2 采样 (二开, 目标 02 · M2) ----
+    // 对每条可见推文记一笔本地画像（lib/kol-signals.ts）：
+    //   - 可见作者 → 原创（statusId 去重，反复扫描不重复计数）；
+    //   - socialContext 转推行把这笔记给转推者（非原创，rt: 前缀区分）。
+    // 推文文本只在原创时用于本地分词（主题集中度），不落原文。
+    // 纯 DOM 读 + Map 计数，无布局、无网络、无 extra fiber walk。
+    function sampleKolFromDom(): void {
+      for (const art of document.querySelectorAll<HTMLElement>('article[data-testid="tweet"]')) {
+        const sid = articleStatusId(art);
+        const author = handleFromArticle(art);
+        if (!sid || !author) continue;
+        const social = art.querySelector('[data-testid="socialContext"]');
+        if (!social) {
+          const text =
+            art.querySelector<HTMLElement>('[data-testid="tweetText"]')?.textContent?.trim().slice(0, 400) ?? "";
+          noteKolSample({ handle: author, statusId: sid, original: true, ...(text ? { text } : {}) });
+          continue;
+        }
+        // socialContext 存在：转推行 → 记给转推者；置顶等其他语境跳过。
+        if (!/转推|转发|retweet|リツイート|리트윗/i.test(social.textContent ?? "")) continue;
+        let retweeter: string | undefined;
+        for (const a of social.querySelectorAll<HTMLAnchorElement>('a[href^="/"]')) {
+          const s = (a.getAttribute("href") ?? "").split("/").filter(Boolean);
+          if (s.length === 1 && /^[A-Za-z0-9_]{1,15}$/.test(s[0] ?? "")) {
+            retweeter = s[0];
+            break;
+          }
+        }
+        if (retweeter) noteKolSample({ handle: retweeter, statusId: `rt:${sid}`, original: false });
+      }
+    }
+
     function scan() {
       captureViewer();
       harvestFollowing();
+      if (settings.kolCardEnabled) sampleKolFromDom();
       const p = extractProfile();
       if (p) {
         const el = document.querySelector<HTMLElement>('[data-testid="UserName"]');
@@ -1746,6 +1797,7 @@ export default defineContentScript({
     ctx.onInvalidated(() => {
       observer.disconnect();
       clearTimeout(debounce);
+      void flushKolSignals(); // 采样缓存落盘（M2）
     });
     // Periodic tick so newly virtualized rows are revisited even when the
     // user stops scrolling (no new DOM mutations). ctx-bound: stops when

@@ -1,6 +1,6 @@
 # KOL 浮卡实施规划（上游计划目标 02）
 
-> 状态：M1 已实现，M2/M3 规划中。
+> 状态：M1、M2 已实现；M3（可选 GraphQL 精确增强）/ M4（打磨）规划中。
 > 目标（来自上游 roadmap 02）：一看就知道这个 KOL 靠谱不 —— 鼠标停在 @handle 上 → 浮卡：账号年龄、原创比、主题集中度、交互质量。
 
 ## 一、交互设计
@@ -15,8 +15,9 @@
 | --- | --- | --- | --- |
 | 账号年龄 | `now - accountCreatedAt` | fiber/bridge（`data-mxga-u`，`lib/x-user-bridge.ts`） | M1 ✅ 零 API |
 | 互动效率（M1 近似） | 赞粉比 `favouritesCount/followersCount`、均赞/推 `favouritesCount/statusesCount` | 同上 | M1 ✅ 零 API |
-| 原创比 | 原创推文 / 总采样推文（排除转推） | M2：scan 累积采样（`socialContext` 转推标记 + 作者比对）；M3：UserTweets GraphQL `legacy.retweeted` | M2/M3 |
-| 主题集中度 | 最近 N 条推文文本关键词域聚类的集中度（本地分词 + 熵） | M2：Profile 页 `profileTweets()` 10 条文本；M3：UserTweets | M2/M3 |
+| 原创比 | 原创推文 / 总采样推文（statusId 去重；socialContext 转推行记给转推者） | M2 ✅：scan 累积采样（`lib/kol-signals.ts`）；M3：UserTweets GraphQL `legacy.retweeted` | M2 ✅ / M3 |
+| 主题集中度 | 最近采样推文文本本地分词（CJK 二元组 + 拉丁词）→ 词的推文覆盖度（文档频率）→ 随机两条推文的期望共享词数 / 单条平均词数，只存计数不存原文 | M2 ✅：scan 推文文本采样；M3：UserTweets | M2 ✅ / M3 |
+| 综合可信分 | 年龄 30% + 关注网络形态 25% + 互动形态 25% + 原创比 20%，缺项回中性；四档着色（靠谱/一般/存疑/高风险） | `lib/kol-signals.ts` trustAssessment | M2 ✅ |
 | 精确交互质量 | 单条推文 reply/retweet/like 中位数 vs 粉丝数 | M3：UserTweets GraphQL | M3 |
 
 关键事实：X 的 MAIN-world React fiber 里免费携带 `accountCreatedAt / followersCount / followingCount / statusesCount / favouritesCount`（`lib/detect.ts` readFiberUser），经 `entrypoints/x-bridge.content.ts` stamp 到 DOM 后，isolated world 零成本读取——M1 的全部指标因此零网络请求。
@@ -24,18 +25,18 @@
 ## 三、数据获取分层
 
 - **L1 页面免费数据（M1 ✅）**：fiber/bridge 档案 + User-Name 显示名提取。桥未 stamp 的节点静默不显示（白名单账号除外——只报身份标识）。
-- **L2 本地累积画像（M2）**：按作者聚合到 profile-signals 缓存（复用 `lib/cache.ts` 的 TTL 分级模式：key=userId，TTL 3 天，惰性过期）；scan 时累积转推标记与推文文本采样。
+- **L2 本地累积画像（M2 ✅）**：按作者聚合到 `lib/kol-signals.ts` 采样缓存（单键 map：key=lowercase handle，TTL 3 天惰性过期，上限 600 条按 updatedAt 淘汰）；scan 对每条可见推文记一笔——可见作者计原创（statusId 环去重 40 条），socialContext 转推行把该笔记给转推者（`rt:` 前缀）；原创推文文本本地分词累积词频（只存计数不存原文）；写入 2s 防抖合并，content script 失效时落盘。
 - **L3 GraphQL 精确增强（M3，默认关）**：UserTweets 拉最近 20 条 → 精确原创比 / 主题 / 交互；新建轻量读限速器（~400ms 间隔 + 429 冷却，独立于写操作的 1.2s 预算）；hover-intent 触发 + 缓存优先。
 
 ## 四、模块
 
 | 模块 | 职责 | 状态 |
 | --- | --- | --- |
-| `lib/kol-card.ts` | 浮卡 UI（单例 overlay、定位、主题、行渲染） | M1 ✅ |
-| `entrypoints/content.ts` | mouseover 委托 + 450ms hover-intent + 桥数据装配 | M1 ✅ |
-| `lib/settings.ts` | `kolCardEnabled` 开关（默认开） | M1 ✅ |
-| `lib/kol-signals.ts` | 画像缓存（TTL）+ 综合可信分 | M2 |
-| `content.ts` scan 采样钩子 | 转推标记 / 推文文本累积 | M2 |
+| `lib/kol-card.ts` | 浮卡 UI（单例 overlay、定位、主题、行渲染、四档着色） | M1 ✅ / M2 ✅ |
+| `entrypoints/content.ts` | mouseover 委托 + 450ms hover-intent + 桥数据装配 + scan 采样钩子 | M1 ✅ / M2 ✅ |
+| `lib/settings.ts` | `kolCardEnabled` 开关（默认开，同时门控采样） | M1 ✅ |
+| `lib/kol-signals.ts` | 采样缓存（TTL 3 天 / statusId 去重 / 词频）+ 主题熵 + 综合可信分 | M2 ✅ |
+| `test/kol-signals.test.ts` | 分词 / 去重 / 集中度 / 可信分 / TTL 回读测试 | M2 ✅ |
 | `lib/x-graphql.ts` + `lib/read-limiter.ts` | UserTweets 读封装 + 读限速 | M3 |
 
 ## 五、风险与约束

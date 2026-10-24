@@ -1,16 +1,18 @@
-// KOL 浮卡 (二开, 上游计划目标 02 · M1)。
+// KOL 浮卡 (二开, 上游计划目标 02 · M2)。
 //
-// 悬停在 @handle 上 → 浮卡展示账号可信度的第一层信号：账号年龄、粉丝/
-// 关注/推文规模、互动效率（赞粉比、均赞/推）、认证与白名单标识。
+// 悬停在 @handle 上 → 浮卡展示账号可信度信号：账号年龄、粉丝/关注/推文
+// 规模、互动效率（赞粉比、均赞/推）、认证与白名单标识，以及 M2 的采样
+// 结论：原创比、主题集中度和综合可信分（四档着色）。
 //
-// M1 数据全部来自 X 自己已经加载进页面的档案（fiber → data-mxga-u 桥，
-// 见 lib/x-user-bridge.ts），零网络请求。原创比 / 主题集中度需要跨页面
-// 采样或 GraphQL，属 M2/M3 —— 卡片为它们预留了行，数据未到位时不渲染。
+// 档案数据全部来自 X 自己已经加载进页面的内容（fiber → data-mxga-u 桥，
+// 见 lib/x-user-bridge.ts），采样结论来自 lib/kol-signals.ts 的本地累积，
+// 零网络请求。M3（可选 GraphQL 精确指标）仍未做。
 //
 // UI 骨架照搬 lib/ui.ts 的 popover：顶层单例 overlay（躲开 transformed
 // 祖先的 fixed 定位问题）、视口翻转定位、rAF 跟随、120ms 延迟隐藏 +
 // 卡片悬停保活、CSS 变量主题（明暗 + X 三主题）。
 
+import { type TrustResult } from "./kol-signals";
 import { detectXTheme } from "./ui";
 
 export interface KolCardData {
@@ -30,6 +32,8 @@ export interface KolCardData {
   sampledTweets?: number;
   /** M2: topic concentration (0-1, higher = narrower). */
   topicFocus?: number;
+  /** M2: 综合可信分（lib/kol-signals.ts trustAssessment）。 */
+  trust?: TrustResult;
   viewerFollowing?: boolean;
 }
 
@@ -197,8 +201,23 @@ function render(data: KolCardData): string {
   const na = `<b class="na">—</b>`;
   const kv = (k: string, v: string | null, s?: string | null) =>
     `<div class="kv"><span class="k">${k}</span>${v ? `<b>${v}</b>` : na}${s ? `<span class="s">${s}</span>` : ""}</div>`;
-  // M2 预留：原创比 / 主题集中度——采样数据未到位就不渲染行，避免一卡片假"-"。
+  // M2 采样行：数据未到位就不渲染，避免一卡片假"-"。
+  const TIER_ZH: Record<TrustResult["tier"], string> = {
+    safe: "靠谱",
+    ok: "一般",
+    warn: "存疑",
+    risk: "高风险",
+  };
+  const TIER_COLOR: Record<TrustResult["tier"], string> = {
+    safe: "var(--safe)",
+    ok: "var(--brand)",
+    warn: "var(--warn)",
+    risk: "var(--danger)",
+  };
   const m2rows = [
+    data.trust
+      ? `<div class="kol-row"><span class="k">综合可信</span><span style="color:${TIER_COLOR[data.trust.tier]}"><b>${data.trust.score}</b>/100 · ${TIER_ZH[data.trust.tier]}</span></div>`
+      : "",
     typeof data.originalRatio === "number"
       ? `<div class="kol-row"><span class="k">原创比</span><span>${(data.originalRatio * 100).toFixed(0)}%<span class="k">（采样 ${data.sampledTweets ?? "?"} 条）</span></span></div>`
       : "",
@@ -236,7 +255,22 @@ export function showKolCard(el: HTMLElement, data: KolCardData): void {
     pop.addEventListener("mouseleave", scheduleHide);
     shadowRoot.appendChild(pop);
   }
-  pop.style.setProperty("--accent", data.whitelisted ? "var(--safe)" : (data.accountAgeDays ?? Infinity) < 30 ? "var(--warn)" : "var(--brand)");
+  const TIER_ACCENT: Record<TrustResult["tier"], string> = {
+    safe: "var(--safe)",
+    ok: "var(--brand)",
+    warn: "var(--warn)",
+    risk: "var(--danger)",
+  };
+  pop.style.setProperty(
+    "--accent",
+    data.whitelisted
+      ? "var(--safe)"
+      : data.trust
+        ? TIER_ACCENT[data.trust.tier]
+        : (data.accountAgeDays ?? Infinity) < 30
+          ? "var(--warn)"
+          : "var(--brand)",
+  );
   pop.innerHTML = render(data);
   anchor = el;
   const place = (r: DOMRect) => {
