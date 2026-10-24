@@ -1,0 +1,278 @@
+// KOL 浮卡 (二开, 上游计划目标 02 · M1)。
+//
+// 悬停在 @handle 上 → 浮卡展示账号可信度的第一层信号：账号年龄、粉丝/
+// 关注/推文规模、互动效率（赞粉比、均赞/推）、认证与白名单标识。
+//
+// M1 数据全部来自 X 自己已经加载进页面的档案（fiber → data-mxga-u 桥，
+// 见 lib/x-user-bridge.ts），零网络请求。原创比 / 主题集中度需要跨页面
+// 采样或 GraphQL，属 M2/M3 —— 卡片为它们预留了行，数据未到位时不渲染。
+//
+// UI 骨架照搬 lib/ui.ts 的 popover：顶层单例 overlay（躲开 transformed
+// 祖先的 fixed 定位问题）、视口翻转定位、rAF 跟随、120ms 延迟隐藏 +
+// 卡片悬停保活、CSS 变量主题（明暗 + X 三主题）。
+
+import { detectXTheme } from "./ui";
+
+export interface KolCardData {
+  handle: string;
+  displayName?: string;
+  verified?: boolean;
+  accountAgeDays?: number;
+  accountCreatedAt?: string;
+  followersCount?: number;
+  followingCount?: number;
+  statusesCount?: number;
+  favouritesCount?: number;
+  whitelisted?: boolean;
+  /** M2: sampled original-tweet ratio (0-1). */
+  originalRatio?: number;
+  /** M2: sampled tweet count behind originalRatio. */
+  sampledTweets?: number;
+  /** M2: topic concentration (0-1, higher = narrower). */
+  topicFocus?: number;
+  viewerFollowing?: boolean;
+}
+
+const THEME = `
+:host { all: initial; }
+* { box-sizing: border-box; font-family: system-ui,-apple-system,"Segoe UI",sans-serif; }
+:host {
+  --surface: rgba(13,17,23,.94); --border: rgba(255,255,255,.10);
+  --shadow: 0 8px 28px rgba(0,0,0,.45); --text: #E6EDF3; --muted: #8B949E;
+  --brand: #0EA5E9; --danger: #EF4444; --warn: #F59E0B; --safe: #16A34A;
+}
+@media (prefers-color-scheme: light) {
+  :host {
+    --surface: rgba(255,255,255,.97); --border: rgba(15,23,42,.12);
+    --shadow: 0 8px 28px rgba(15,23,42,.18); --text: #0F172A; --muted: #475569;
+    --brand: #0369A1; --danger: #DC2626; --warn: #B45309; --safe: #15803D;
+  }
+}
+:host([data-xss-theme="dark"]) {
+  --surface: rgba(13,17,23,.94); --border: rgba(255,255,255,.10);
+  --shadow: 0 8px 28px rgba(0,0,0,.45); --text: #E6EDF3; --muted: #8B949E;
+  --brand: #0EA5E9; --danger: #EF4444; --warn: #F59E0B; --safe: #16A34A;
+}
+:host([data-xss-theme="light"]) {
+  --surface: rgba(255,255,255,.97); --border: rgba(15,23,42,.12);
+  --shadow: 0 8px 28px rgba(15,23,42,.18); --text: #0F172A; --muted: #475569;
+  --brand: #0369A1; --danger: #DC2626; --warn: #B45309; --safe: #15803D;
+}
+.kolpop {
+  position: fixed; z-index: 2147483001; width: 300px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-left: 3px solid var(--accent, var(--muted));
+  border-radius: 12px; box-shadow: var(--shadow);
+  color: var(--text); -webkit-font-smoothing: antialiased;
+  padding: 10px 12px; font-size: 12.5px; line-height: 1.45;
+}
+.kol-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.kol-name { font-weight: 600; font-size: 13.5px; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kol-name .h { color: var(--muted); font-weight: 400; }
+.kol-flag { flex: none; font-size: 10.5px; padding: 1px 6px; border-radius: 999px;
+  border: 1px solid currentColor; }
+.kol-flag.wl { color: var(--safe); }
+.kol-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 10px; }
+.kv { min-width: 0; }
+.kv .k { display: block; color: var(--muted); font-size: 11px; }
+.kv b { font-size: 13px; font-variant-numeric: tabular-nums; }
+.kv .s { display: block; color: var(--muted); font-size: 10.5px; }
+.kv .na { color: var(--muted); font-weight: 400; }
+.kol-rows { margin-top: 8px; }
+.kol-row { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
+.kol-row .k { color: var(--muted); }
+.kol-foot { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border);
+  color: var(--muted); font-size: 10.5px; display: flex; justify-content: space-between; }
+.kol-foot a { color: var(--brand); text-decoration: none; }
+`;
+
+function esc(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** 12,345 → zh-friendly "1.2万" style. The card language follows the rest of
+ *  the extension (Chinese), regardless of X's UI language. */
+function fmtCount(n: number | undefined): string | null {
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return null;
+  if (n >= 1e8) return `${(n / 1e8).toFixed(1).replace(/\.0$/, "")}亿`;
+  if (n >= 1e4) return `${(n / 1e4).toFixed(1).replace(/\.0$/, "")}万`;
+  return n.toLocaleString("zh-CN");
+}
+
+function fmtAge(days: number | undefined): { main: string; since: string | null } | null {
+  if (typeof days !== "number" || !Number.isFinite(days) || days < 0) return null;
+  let main: string;
+  if (days < 60) main = `${days} 天`;
+  else if (days < 365) main = `${Math.round(days / 30)} 个月`;
+  else main = `${(days / 365).toFixed(1).replace(/\.0$/, "")} 年`;
+  return { main, since: null };
+}
+
+function fmtRatio(n: number | undefined, digits = 2): string | null {
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return null;
+  return n.toFixed(digits);
+}
+
+let host: HTMLElement | null = null;
+let shadow: ShadowRoot | null = null;
+let pop: HTMLElement | null = null;
+let hideTimer: ReturnType<typeof setTimeout> | undefined;
+let raf = 0;
+let anchor: HTMLElement | null = null;
+
+function root(): ShadowRoot {
+  if (shadow?.host.isConnected) return shadow;
+  host = document.createElement("div");
+  host.setAttribute("data-xss-kol", "");
+  host.setAttribute("data-xss-theme", detectXTheme());
+  host.style.cssText = "position:fixed;left:0;top:0;width:0;height:0;z-index:2147483001;";
+  document.documentElement.appendChild(host);
+  shadow = host.attachShadow({ mode: "open" });
+  const st = document.createElement("style");
+  st.textContent = THEME;
+  shadow.appendChild(st);
+  return shadow;
+}
+
+function close(): void {
+  clearTimeout(hideTimer);
+  cancelAnimationFrame(raf);
+  pop?.remove();
+  pop = null;
+  anchor = null;
+  window.removeEventListener("scroll", onScroll, true);
+  document.removeEventListener("pointerdown", onOutsidePointerDown, true);
+}
+
+function onScroll(): void {
+  close();
+}
+
+function onOutsidePointerDown(event: PointerEvent): void {
+  if (!pop) return;
+  const path = event.composedPath();
+  if ((anchor && path.includes(anchor)) || path.includes(pop)) return;
+  hide(true);
+}
+
+function hide(force = false): void {
+  if (!force && pop?.matches(":hover")) {
+    scheduleHide();
+    return;
+  }
+  close();
+}
+
+function scheduleHide(): void {
+  clearTimeout(hideTimer);
+  hideTimer = setTimeout(() => hide(), 120);
+}
+
+function render(data: KolCardData): string {
+  const name = data.displayName?.trim();
+  const age = fmtAge(data.accountAgeDays);
+  const since =
+    data.accountCreatedAt && !Number.isNaN(Date.parse(data.accountCreatedAt))
+      ? (() => {
+          const d = new Date(data.accountCreatedAt);
+          return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, "0")} 注册`;
+        })()
+      : null;
+  const followers = fmtCount(data.followersCount);
+  const following = fmtCount(data.followingCount);
+  const statuses = fmtCount(data.statusesCount);
+  const favRatio =
+    typeof data.favouritesCount === "number" && typeof data.followersCount === "number" && data.followersCount > 0
+      ? fmtRatio(data.favouritesCount / data.followersCount)
+      : null;
+  const perTweet =
+    typeof data.favouritesCount === "number" && typeof data.statusesCount === "number" && data.statusesCount > 0
+      ? fmtRatio(data.favouritesCount / data.statusesCount, 1)
+      : null;
+  const na = `<b class="na">—</b>`;
+  const kv = (k: string, v: string | null, s?: string | null) =>
+    `<div class="kv"><span class="k">${k}</span>${v ? `<b>${v}</b>` : na}${s ? `<span class="s">${s}</span>` : ""}</div>`;
+  // M2 预留：原创比 / 主题集中度——采样数据未到位就不渲染行，避免一卡片假"-"。
+  const m2rows = [
+    typeof data.originalRatio === "number"
+      ? `<div class="kol-row"><span class="k">原创比</span><span>${(data.originalRatio * 100).toFixed(0)}%<span class="k">（采样 ${data.sampledTweets ?? "?"} 条）</span></span></div>`
+      : "",
+    typeof data.topicFocus === "number"
+      ? `<div class="kol-row"><span class="k">主题集中度</span><span>${(data.topicFocus * 100).toFixed(0)}%</span></div>`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("");
+  return `
+  <div class="kol-head">
+    <span class="kol-name">${esc(name || `@${data.handle}`)} <span class="h">@${esc(data.handle)}</span>${data.verified ? " ✓" : ""}</span>
+    ${data.whitelisted ? `<span class="kol-flag wl">白名单</span>` : ""}
+  </div>
+  <div class="kol-grid">
+    ${kv("账号年龄", age ? age.main : null, age ? since : null)}
+    ${kv("粉丝", followers)}
+    ${kv("关注", following)}
+    ${kv("推文", statuses)}
+    ${kv("赞粉比", favRatio)}
+    ${kv("均赞/推", perTweet)}
+  </div>
+  ${m2rows ? `<div class="kol-rows">${m2rows}</div>` : ""}
+  <div class="kol-foot"><span>filtrationX 本地数据 · 不联网查询</span><a href="https://x.com/${encodeURIComponent(data.handle)}" target="_blank" rel="noopener">查看主页 ↗</a></div>`;
+}
+
+/** Show (or move/re-render) the card anchored to `el`. Idempotent per frame. */
+export function showKolCard(el: HTMLElement, data: KolCardData): void {
+  const shadowRoot = root();
+  if (!pop) {
+    pop = document.createElement("div");
+    pop.className = "kolpop";
+    pop.setAttribute("data-xss-theme", detectXTheme());
+    pop.addEventListener("mouseenter", () => clearTimeout(hideTimer));
+    pop.addEventListener("mouseleave", scheduleHide);
+    shadowRoot.appendChild(pop);
+  }
+  pop.style.setProperty("--accent", data.whitelisted ? "var(--safe)" : (data.accountAgeDays ?? Infinity) < 30 ? "var(--warn)" : "var(--brand)");
+  pop.innerHTML = render(data);
+  anchor = el;
+  const place = (r: DOMRect) => {
+    if (!pop) return;
+    const W = pop.offsetWidth || 300;
+    const H = pop.offsetHeight || 140;
+    // 右侧优先（handle 在行首），放不下翻到左侧；垂直方向上下翻转。
+    let left = r.right + 8;
+    if (left + W > window.innerWidth - 8) left = r.left - W - 8;
+    if (left < 8) left = Math.min(Math.max(8, r.left), window.innerWidth - W - 8);
+    let top = r.top;
+    if (top + H > window.innerHeight - 8) top = Math.max(8, r.top + r.height - H);
+    pop.style.left = `${Math.max(8, left)}px`;
+    pop.style.top = `${Math.max(8, top)}px`;
+  };
+  place(el.getBoundingClientRect());
+  cancelAnimationFrame(raf);
+  const track = () => {
+    if (!pop || !anchor) return;
+    const r = anchor.getBoundingClientRect();
+    if (!anchor.isConnected || (!r.width && !r.height)) {
+      close();
+      return;
+    }
+    place(r);
+    raf = requestAnimationFrame(track);
+  };
+  raf = requestAnimationFrame(track);
+  window.addEventListener("scroll", onScroll, { capture: true, passive: true });
+  document.addEventListener("pointerdown", onOutsidePointerDown, true);
+}
+
+export function hideKolCard(force = false): void {
+  hide(force);
+}
+
+export function scheduleHideKolCard(): void {
+  scheduleHide();
+}

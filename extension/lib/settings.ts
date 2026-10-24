@@ -56,6 +56,7 @@ export interface Settings {
   officialRulesEnabled: boolean; // master switch for the synced maintainer-curated keyword rules (per-rule disables live in xss:rules:disabled)
   ruleTelemetry: boolean; // anonymously report OFFICIAL rule hits (spam account identity + matched rule only, never the user's own info) so the maintainer can review & publish them
   ruleHitsAutoAct: boolean; // opt-in: keyword-rule hits follow the per-category action (incl. X mute/block) instead of being capped at the local hide. Still gated by autoTierMode + reply-scope
+  kolCardEnabled: boolean; // KOL hover card (目标02): hovering @handles shows account age, follower scale and interaction-efficiency signals — all read locally from the page, zero API
   followingWhitelist: boolean; // auto-add accounts the viewer follows to the LOCAL whitelist (never badged / auto-processed); entries live in xss:whitelist:local
 }
 
@@ -84,6 +85,7 @@ export const DEFAULTS: Settings = {
   officialRulesEnabled: true,
   ruleTelemetry: true,
   ruleHitsAutoAct: false,
+  kolCardEnabled: true,
   followingWhitelist: true,
 };
 

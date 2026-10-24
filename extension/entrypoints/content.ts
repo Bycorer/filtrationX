@@ -14,9 +14,12 @@ import {
   extractProfile,
   extractThreadTopic,
   handleFromArticle,
+  profileHandle,
   viewerHandle,
 } from "../lib/detect";
 import { CATEGORY_ZH, type SpamCategory } from "../lib/category";
+import { hideKolCard, scheduleHideKolCard, showKolCard } from "../lib/kol-card";
+import { readBridgeUser } from "../lib/x-user-bridge";
 import { LIST_KEY, WL_KEY } from "../lib/list-sync";
 import { type IndexEntry, isWhitelisted, lookupLocal, warmLocalIndex } from "../lib/local-index";
 import { matchLocalRules, warmRuleConfig } from "../lib/local-rules";
@@ -536,6 +539,92 @@ export default defineContentScript({
     } catch {
       /* non-fatal */
     }
+
+    // ---- KOL 悬浮卡 (二开, 目标 02 · M1) ----
+    // 悬停在 @handle 上 → 浮卡展示账号年龄 / 粉丝规模 / 互动效率。
+    // M1 全部数据来自 MAIN-world 桥 stamp（data-mxga-u），零网络请求；
+    // 桥未 stamp 到的节点静默不显示（白名单账号除外——那张卡只报身份）。
+    let kolTimer: ReturnType<typeof setTimeout> | undefined;
+    let kolAnchor: HTMLElement | null = null;
+    let kolHandle = "";
+    const KOL_HOVER_DELAY_MS = 450;
+    const kolCancel = () => {
+      clearTimeout(kolTimer);
+      kolTimer = undefined;
+    };
+    document.addEventListener(
+      "mouseover",
+      (event) => {
+        if (!settings.kolCardEnabled) return;
+        const t = event.target instanceof Element ? event.target : null;
+        if (!t) return;
+        const nameWrap = t.closest('[data-testid="User-Name"]');
+        if (!nameWrap) {
+          if (kolTimer || kolAnchor) {
+            kolCancel();
+            scheduleHideKolCard();
+          }
+          return;
+        }
+        const link = nameWrap.querySelector('a[href^="/"]') as HTMLAnchorElement | null;
+        const m = /^\/([A-Za-z0-9_]{1,15})(?:$|\/)/.exec(link?.getAttribute("href") ?? "");
+        if (!m) {
+          kolCancel();
+          scheduleHideKolCard();
+          return;
+        }
+        const handle = m[1] ?? "";
+        if (!handle) {
+          kolCancel();
+          scheduleHideKolCard();
+          return;
+        }
+        if (kolAnchor && handle.toLowerCase() === kolHandle.toLowerCase()) return; // same row, already pending/open
+        kolCancel();
+        scheduleHideKolCard();
+        hideKolCard();
+        kolHandle = handle;
+        kolAnchor = nameWrap as HTMLElement;
+        kolTimer = setTimeout(() => {
+          kolTimer = undefined;
+          const anchorEl = kolAnchor;
+          if (!anchorEl) return;
+          const article = anchorEl.closest('article[data-testid="tweet"]');
+          let u = readBridgeUser(article ?? null, handle);
+          if (!Object.keys(u).length) {
+            // Profile 页没有 article：主列被桥 stamp 为当前页主账号。
+            const ph = profileHandle();
+            if (ph && ph.toLowerCase() === handle.toLowerCase()) {
+              u = readBridgeUser(document.querySelector('[data-testid="primaryColumn"]'), ph);
+            }
+          }
+          const whitelisted =
+            isLocallyWhitelisted(u.userId, handle) || isWhitelisted(u.userId, handle);
+          if (!Object.keys(u).length && !whitelisted) return; // 桥未就绪 → 静默
+          // 显示名：User-Name 里第一个链接是昵称（无昵称时才是 handle）。
+          const firstLink = anchorEl.querySelector('a[href^="/"]');
+          const firstText = firstLink?.textContent?.trim() ?? "";
+          const displayName =
+            firstText && !/^@/.test(firstText) && firstText.toLowerCase() !== handle.toLowerCase()
+              ? firstText
+              : undefined;
+          showKolCard(anchorEl, {
+            handle,
+            displayName,
+            verified: u.isVerified,
+            accountAgeDays: u.accountAgeDays,
+            accountCreatedAt: u.accountCreatedAt,
+            followersCount: u.followersCount,
+            followingCount: u.followingCount,
+            statusesCount: u.statusesCount,
+            favouritesCount: u.favouritesCount,
+            whitelisted,
+            viewerFollowing: u.viewerFollowing,
+          });
+        }, KOL_HOVER_DELAY_MS);
+      },
+      true,
+    );
 
     function restoreProtectedSurfaces() {
       const active = new Set<string>();

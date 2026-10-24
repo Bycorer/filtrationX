@@ -2472,6 +2472,12 @@ function DetectionRulesSection({
         hint="关闭后同步的官方规则全部不再生效；公共黑名单命中不受影响"
       />
       <Toggle
+        on={st.kolCardEnabled}
+        onChange={(v) => save("kolCardEnabled", v)}
+        label="KOL 悬浮卡（目标 02）"
+        hint="悬停在 @handle 上显示账号年龄、粉丝规模、互动效率等本地信号——全部读自页面自身数据，零联网查询。原创比与主题集中度将随采样逐步上线"
+      />
+      <Toggle
         on={st.ruleTelemetry}
         onChange={(v) => save("ruleTelemetry", v)}
         label="匿名回传官方规则命中"
