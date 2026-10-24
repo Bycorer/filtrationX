@@ -88,9 +88,7 @@ async function pumpBlockQueue(): Promise<void> {
       const {
         getBlockQueue,
         saveBlockQueue,
-        blockQueueDayKey,
         BLOCK_QUEUE_WORKER_KEY,
-        DAILY_CAP,
         MAX_FAIL_STREAK,
         PUMP_INTERVAL_MS,
         PUMP_JITTER_MS,
@@ -100,17 +98,6 @@ async function pumpBlockQueue(): Promise<void> {
       if (q.cursor >= q.items.length) {
         q.running = false;
         q.needTab = false;
-        await saveBlockQueue(q);
-        return;
-      }
-      const dk = blockQueueDayKey();
-      if (q.dayKey !== dk) {
-        q.dayKey = dk;
-        q.dayCount = 0;
-      }
-      if (q.dayCount >= DAILY_CAP) {
-        q.paused = true;
-        q.lastError = `已达每日安全上限（${DAILY_CAP} 个/天）——明天继续，或确认风控无虞后手动「继续」`;
         await saveBlockQueue(q);
         return;
       }
@@ -147,7 +134,6 @@ async function pumpBlockQueue(): Promise<void> {
         q.failStreak++;
         q.lastError = res.status ? `X 返回 ${res.status}` : "动作未执行";
       }
-      q.dayCount++;
       if (!res.ok && !res.skipped && q.failStreak >= MAX_FAIL_STREAK) {
         q.running = false;
         q.paused = false;

@@ -727,7 +727,7 @@ function XBlocksPage() {
 }
 
 /** 黑名单一键拉黑任务卡（二开）：把公共黑名单条目用你的 X 登录态批量拉黑。
- *  节奏由后台严格控制（每个约 3.7-5 秒、每日上限 400、连续失败自动停止），
+ *  节奏由后台严格控制（每个约 3.7-5 秒、连续失败自动停止），无每日数量上限，
  *  需要保持一个打开的 x.com 标签页作为执行器。 */
 function BlockQueueCard() {
   const [q, setQ] = useState<BlockQueueState | null>(null);
@@ -812,7 +812,7 @@ function BlockQueueCard() {
         <div className="min-w-[220px] flex-1">
           <div className="text-[13px] font-semibold text-fg">黑名单一键拉黑</div>
           <p className="mt-0.5 text-[12px] leading-relaxed text-fg-3">
-            用你的 X 登录态把名单里的账号原生拉黑。节奏刻意放慢（每个约 4 秒、每日上限 400 个），执行期间请保持一个 x.com 标签页打开。
+            用你的 X 登录态把名单里的账号原生拉黑。节奏刻意放慢（每个约 4 秒），无每日数量上限；执行期间请保持一个 x.com 标签页打开。
           </p>
         </div>
         <div className="flex flex-none items-center gap-2">

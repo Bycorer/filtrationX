@@ -40,8 +40,6 @@ export interface BlockQueueState {
   failed: number;
   failStreak: number;
   lastError: string | null;
-  dayKey: string;
-  dayCount: number;
   startedAt: number | null;
   updatedAt: number;
 }
@@ -52,16 +50,13 @@ export const BLOCK_QUEUE_WORKER_KEY = "xss:block-queue:worker";
 
 export const PUMP_INTERVAL_MS = 2500;
 export const PUMP_JITTER_MS = 1200;
-export const DAILY_CAP = 400;
+// 2026-10 二开调整：按用户要求移除每日配额（DAILY_CAP）。防风控仍由
+// 节奏限速（pump 间隔 + x-action 冷却）和失败熔断负责；单次运行数量
+// 仍由 options 页的 RUN_LIMITS 限定。
 export const MAX_FAIL_STREAK = 5;
 export const MAX_QUEUE_ITEMS = 5000;
 /** Run-size choices offered by the options page. */
 export const RUN_LIMITS = [100, 300, 500] as const;
-
-export function blockQueueDayKey(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
 
 export function emptyBlockQueue(): BlockQueueState {
   return {
@@ -74,8 +69,6 @@ export function emptyBlockQueue(): BlockQueueState {
     failed: 0,
     failStreak: 0,
     lastError: null,
-    dayKey: blockQueueDayKey(),
-    dayCount: 0,
     startedAt: null,
     updatedAt: 0,
   };
